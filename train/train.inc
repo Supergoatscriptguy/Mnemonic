@@ -1,6 +1,6 @@
 ; the trainer's parts: the data loader (train/data.asm) and checkpoints (train/ckpt.asm)
 
-extern ld_init, ld_rows, ld_val, ld_file, ld_off, ld_nfiles, ld_chat
+extern ld_init, ld_rows, ld_val, ld_file, ld_off, ld_nfiles, ld_chat, ld_ctx
 extern ck_save, ck_load, ck_latest, ck_prune
 
 ; checkpoint file: this header, then the f32 master weights, adam m, adam v

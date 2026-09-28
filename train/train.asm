@@ -18,7 +18,7 @@ bits 64
 extern ExitProcess, SetThreadExecutionState
 
 MAXACC equ 1024
-SAMPT  equ 128                  ; samples run on one row this long
+SAMPT  equ 256                  ; samples run on one row this long
 MAXK   equ 64
 
 section .rdata
@@ -51,6 +51,7 @@ k_temp    db "temp", 0
 k_topk    db "top_k", 0
 k_gen     db "gen", 0
 k_gcount  db "gen_count", 0
+k_init    db "init", 0
 d_data    db "datasets\fineweb\shard_*.tok", 0
 d_val     db "datasets\fineweb\shard_01822.tok", 0
 d_tok     db "datasets\tokenizer.bin", 0
@@ -127,6 +128,8 @@ nrep      resq 1                ; next step to report
 lastsave  resq 1
 logh      resq 1
 tctx      resq 1
+valchat   resq 1                ; the val file is chat data
+valtgt    resq 1                ; targets in the val rows
 ; buffers
 hstep     resq 2                ; pinned, a step's tokens + sorts, double buffered
 dstep     resq 1
@@ -195,6 +198,8 @@ start:
 .tok:
     call tok_cache_new
     mov [tctx], rax
+    mov rax, [mdl+MD_T]
+    mov [ld_ctx], rax
     mov rcx, [datapat]
     mov rdx, [valpath]
     call ld_init
@@ -393,6 +398,34 @@ buffers:
     imul r8, [valb]
     mov r9, [mdl+MD_T]
     call ld_val
+    mov [valchat], rax
+    ; what the val loss divides by: every token, or the MASKBIT ones for chat
+    ; (a row's first token is never a target)
+    mov rax, [mdl+MD_M]
+    imul rax, [valb]
+    mov [valtgt], rax
+    cmp qword [valchat], 0
+    je .up
+    xor eax, eax
+    mov rcx, [msg]
+    mov rdx, [mdl+MD_B]
+    imul rdx, [valb]            ; rows
+.vrow:
+    mov r8, [mdl+MD_T]
+    lea r9, [rcx+2]
+.vt:
+    test word [r9], MASKBIT
+    jz .vn
+    inc rax
+.vn:
+    add r9, 2
+    dec r8
+    jnz .vt
+    mov rcx, r9
+    dec rdx
+    jnz .vrow
+    mov [valtgt], rax
+.up:
     mov rcx, rbx
     call gpu_alloc
     mov [dval], rax
@@ -499,8 +532,34 @@ resume:
     add rsp, 40
     ret
 .fresh:
+    ; init=path: a new run that starts from another run's weights (fine-tuning).
+    ; the weights only: adam starts over, and so do the step and the data
+    lea rcx, [k_init]
+    xor edx, edx
+    call cfg_str
+    test rax, rax
+    jz .random
+    mov [rsp+32], rax
+    mov rcx, rax
+    lea rdx, [hdr]
+    call ck_load
+    mov rcx, [d_adm]
+    xor edx, edx
+    mov r8, [mdl+MD_NP]
+    CU cuMemsetD32
+    mov rcx, [d_adv]
+    xor edx, edx
+    mov r8, [mdl+MD_NP]
+    CU cuMemsetD32
+    say "  starting from the weights in "
+    mov rcx, [rsp+32]
+    call print_z
+    say 13, 10
+    jmp .seeded
+.random:
     mov rcx, [seed]
     call model_init
+.seeded:
     lea rcx, [rng]
     mov rdx, [seed]
     call rng_seed
@@ -1152,7 +1211,8 @@ validate:
     mov [mb+MB_B], rax
     mov rax, [mdl+MD_T]
     mov [mb+MB_T], rax
-    mov dword [mb+MB_FLAGS], 0
+    mov eax, [valchat]
+    mov [mb+MB_FLAGS], eax
     mov rsi, [dval]
     xor ebx, ebx
 .b:
@@ -1170,9 +1230,7 @@ validate:
     jmp .b
 .sum:
     call model_loss
-    mov rax, [mdl+MD_M]
-    imul rax, [valb]
-    cvtsi2sd xmm1, rax
+    cvtsi2sd xmm1, qword [valtgt]
     divsd xmm0, xmm1
     movsd [stats+PS_VLOSS], xmm0
     lea rdi, [msg]
@@ -1231,9 +1289,23 @@ sample:
     mov r8, rdx
     mov rcx, [tctx]
     mov rdx, rsi
+    cmp qword [ld_chat], 0
+    jne .chat
     lea r9, [seq+2]
     call tok_encode
     lea r12, [rax+1]            ; tokens so far
+    jmp .ready
+.chat:
+    ; a chat model gets it as a user turn: <|bos|><|user|> prompt <|end|><|assistant|>
+    mov word [seq+2], TOK_USER
+    lea r9, [seq+4]
+    call tok_encode
+    lea r12, [rax+2]
+    lea rcx, [seq]
+    mov word [rcx+r12*2], TOK_END
+    mov word [rcx+r12*2+2], TOK_ASSIST
+    add r12, 2
+.ready:
     mov r13, r12                ; where the prompt ends
     xor ebx, ebx
 .gen:
@@ -1270,15 +1342,28 @@ sample:
     inc rbx
     jmp .gen
 .show:
-    ; "  prompt|continuation", control characters shown as spaces
+    ; "  prompt continuation", or for chat "  > prompt" and the reply on the next
+    ; line. control characters come out as spaces
     lea rdi, [msg]
     emit "  ", 27, "[90m"
-    lea rcx, [seq+2]
+    mov ecx, 1                  ; where the prompt starts
     lea rdx, [r13-1]
+    cmp qword [ld_chat], 0
+    je .ps
+    emit "> "
+    mov ecx, 2
+    lea rdx, [r13-4]
+.ps:
+    lea rax, [seq]
+    lea rcx, [rax+rcx*2]
     mov r8, rdi
     call tok_decode
     add rdi, rax
     emit 27, "[0m"
+    cmp qword [ld_chat], 0
+    je .reply
+    emit 13, 10, "  "
+.reply:
     lea rcx, [seq]
     lea rcx, [rcx+r13*2]
     mov rdx, r12

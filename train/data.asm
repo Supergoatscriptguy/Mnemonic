@@ -18,14 +18,17 @@ section .rdata
 e_none   db "no .tok files match the data pattern", 0
 e_tok    db "not a .tok file for this vocab: ", 0
 e_short  db "the val file is too short for val_batches", 0
+e_block  db "packed for a different ctx: ", 0
 
 section .bss
 alignb 8
-global ld_nfiles, ld_file, ld_off, ld_chat
+global ld_nfiles, ld_file, ld_off, ld_chat, ld_ctx
 ld_nfiles resq 1
 ld_file   resq 1                ; file the next row comes from
 ld_off    resq 1                ; and its first token
 ld_chat   resq 1                ; 1 = chat files, MASKBIT marks the targets
+ld_ctx    resq 1                ; the model's ctx, packed files have to match
+vchat     resq 1
 names     resq MAXF
 base      resq 1                ; mapped file, 0 = none
 mapped    resq 1                ; which one
@@ -138,9 +141,21 @@ mapfile:
     mov rcx, [rax+TF_FLAGS]
     and ecx, 1
     mov [ld_chat], rcx
+    ; chatpack'd files are blocks of one ctx, rows only line up with the same one
+    mov rcx, [rax+TF_BLOCK]
+    test rcx, rcx
+    jz .ok
+    cmp rcx, [ld_ctx]
+    jne .block
+.ok:
     add rsp, 32
     pop rbx
     ret
+.block:
+    lea rcx, [e_block]
+    call print_z
+    mov rcx, rbx
+    call fatal
 .bad:
     lea rcx, [e_tok]
     call print_z
@@ -219,7 +234,7 @@ ld_rows:
     ret
 
 ; rcx = path, rdx = dst, r8 = rows, r9 = T. the first rows of a file (validation),
-; without touching the training position
+; without touching the training position. rax = 1 if it's chat data
 global ld_val
 ld_val:
     push rbx
@@ -241,6 +256,8 @@ ld_val:
 .map:
     mov rcx, rbx
     call mapfile
+    mov rax, [ld_chat]
+    mov [vchat], rax
     mov rax, r12
     imul rax, r13
     inc rax
@@ -266,6 +283,7 @@ ld_val:
     mov qword [base], 0
     mov rcx, [ld_file]
     call use                    ; back to the training file (and its ld_chat)
+    mov rax, [vchat]
     add rsp, 32
     pop r13
     pop r12

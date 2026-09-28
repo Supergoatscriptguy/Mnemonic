@@ -8,7 +8,7 @@ for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu gra
     call .\build.bat test\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 rem the tools too, so nothing rots unnoticed
-for %%t in (pqinfo pqcat extract docsinfo download) do (
+for %%t in (pqinfo pqcat extract docsinfo download chatdocs) do (
     call .\build.bat data\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 for %%t in (bpetrain tokenize tokshow) do (
@@ -18,6 +18,7 @@ for %%t in (gpuinfo gpubench) do (
     call .\build.bat gpu\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 call .\build.bat train\train >nul || (echo build failed: train& set BAD=1)
+call .\build.bat train\chatpack >nul || (echo build failed: chatpack& set BAD=1)
 call .\build.bat test\resume >nul || (echo build failed: resume& set BAD=1)
 if %BAD%==1 goto done
 

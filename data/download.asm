@@ -1,5 +1,7 @@
 ; download fineweb FIRST LAST [jobs]    shards FIRST..LAST of karpathy/fineweb-edu-100b-shuffle
 ; download smoltalk FIRST LAST [jobs]   train files FIRST..LAST (0-8) of HuggingFaceTB/smoltalk
+; download chat FIRST LAST [jobs]       train files FIRST..LAST (0-3) of HuggingFaceTB/smol-smoltalk
+; download chattest 0 0                 its test file
 ; into datasets\fineweb or datasets\smoltalk. each file lands as .tmp and gets
 ; renamed once it's all there, and files that already exist are skipped, so
 ; just run it again after a failure. jobs = parallel downloads, default 4
@@ -35,6 +37,13 @@ st_url   db "/datasets/HuggingFaceTB/smoltalk/resolve/main/data/all/train-", 0
 st_dir   db "datasets\smoltalk", 0
 st_dest  db "datasets\smoltalk\train-", 0
 st_ext   db "-of-00009.parquet", 0
+ch_url   db "/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/train-", 0
+ch_dir   db "datasets\chat", 0
+ch_dest  db "datasets\chat\train-", 0
+ch_ext   db "-of-00004.parquet", 0
+cht_url  db "/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/test-", 0
+cht_dest db "datasets\chat\test-", 0
+cht_ext  db "-of-00001.parquet", 0
 ds_dir   db "datasets", 0
 s_tmp    db ".tmp", 0
 m_done   db "got  ", 0
@@ -81,6 +90,8 @@ start:
     mov rax, [argv+8]
     cmp dword [rax], 'fine'
     je .fw
+    cmp dword [rax], 'chat'
+    je .chat
     cmp dword [rax], 'smol'
     jne .usage
     lea rax, [st_url]
@@ -90,6 +101,22 @@ start:
     lea rax, [st_ext]
     mov [ext], rax
     lea rcx, [st_dir]
+    call make_dir
+    jmp .range
+.chat:
+    lea rcx, [ch_url]
+    lea rdx, [ch_dest]
+    lea r8, [ch_ext]
+    cmp byte [rax+4], 't'       ; chattest: the one test file
+    jne .ch
+    lea rcx, [cht_url]
+    lea rdx, [cht_dest]
+    lea r8, [cht_ext]
+.ch:
+    mov [url_pre], rcx
+    mov [dest_pre], rdx
+    mov [ext], r8
+    lea rcx, [ch_dir]
     call make_dir
     jmp .range
 .fw:

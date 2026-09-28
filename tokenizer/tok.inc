@@ -42,6 +42,8 @@ TF_NDOCS   equ 16
 TF_VOCAB   equ 24
 TF_HASH    equ 32               ; tokenizer that made it
 TF_FLAGS   equ 40               ; 1 = chat: MASKBIT marks the targets
+TF_BLOCK   equ 48               ; packed by chatpack: every conversation sits inside one
+                                ; block of this many tokens (the ctx), 0 = a plain stream
 TF_SIZE    equ 64
 
 ; bpe_train
