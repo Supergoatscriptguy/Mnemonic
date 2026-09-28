@@ -6,6 +6,7 @@ bits 64
 extern CreateFileA, ReadFile, WriteFile, GetFileSizeEx, FlushFileBuffers, CloseHandle
 extern CreateFileMappingA, MapViewOfFile, UnmapViewOfFile
 extern MoveFileExA, DeleteFileA, GetFileAttributesA, CreateDirectoryA
+extern FindFirstFileA, FindNextFileA, FindClose
 
 GENERIC_READ  equ 0x80000000
 GENERIC_WRITE equ 0x40000000
@@ -14,6 +15,7 @@ CREATE_ALWAYS equ 2
 OPEN_EXISTING equ 3
 OPEN_ALWAYS   equ 4
 CHUNK         equ 1 << 30       ; ReadFile/WriteFile sizes are 32-bit
+MAXPATH       equ 260
 
 section .text
 
@@ -267,3 +269,141 @@ global make_dir
 make_dir:
     xor edx, edx
     jmp CreateDirectoryA
+
+; rcx = pattern like datasets\x\*.tok, rdx = buffer, r8 = its size.
+; every match's full path goes in the buffer (zero terminated, back to back),
+; then an array of pointers to them, sorted by name.
+; rax = how many, rdx = the pointer array
+global file_find
+file_find:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 48
+    mov rsi, rcx
+    mov rdi, rdx
+    mov [rsp+32], rdx           ; buffer start
+    lea r14, [rdx+r8]           ; and end
+    ; directory prefix: everything up to the last backslash
+    xor r13d, r13d
+    xor eax, eax
+.pre:
+    mov cl, [rsi+rax]
+    test cl, cl
+    jz .find
+    inc rax
+    cmp cl, '\'
+    jne .pre
+    mov r13, rax
+    jmp .pre
+.find:
+    mov rcx, rsi
+    lea rdx, [finddata]
+    call FindFirstFileA
+    xor r15d, r15d
+    cmp rax, -1
+    je .ptrs
+    mov rbx, rax
+.one:
+    lea rax, [rdi+r13+MAXPATH+8]
+    cmp rax, r14
+    ja .next                    ; out of room
+    mov rcx, r13
+    mov rax, rsi
+.cp:
+    test rcx, rcx
+    jz .name
+    mov dl, [rax]
+    mov [rdi], dl
+    inc rax
+    inc rdi
+    dec rcx
+    jmp .cp
+.name:
+    lea rax, [finddata+44]      ; cFileName
+.cn:
+    mov dl, [rax]
+    mov [rdi], dl
+    inc rax
+    inc rdi
+    test dl, dl
+    jnz .cn
+    inc r15
+.next:
+    mov rcx, rbx
+    lea rdx, [finddata]
+    call FindNextFileA
+    test eax, eax
+    jnz .one
+    mov rcx, rbx
+    call FindClose
+.ptrs:
+    add rdi, 7
+    and rdi, -8
+    mov r12, rdi                ; pointer array
+    lea rax, [r12+r15*8]
+    cmp rax, r14
+    jbe .fill
+    xor r15d, r15d              ; no room for the pointers, call it nothing
+.fill:
+    mov rax, [rsp+32]
+    xor ecx, ecx
+.p:
+    cmp rcx, r15
+    jae .sort
+    mov [r12+rcx*8], rax
+.sk:
+    cmp byte [rax], 0
+    lea rax, [rax+1]
+    jne .sk
+    inc rcx
+    jmp .p
+.sort:
+    ; insertion sort, there are only ever a few hundred
+    mov ecx, 1
+.i:
+    cmp rcx, r15
+    jae .done
+    mov r8, [r12+rcx*8]
+    mov r9, rcx
+.j:
+    test r9, r9
+    jz .put
+    mov r10, [r12+r9*8-8]
+    xor eax, eax
+.c:
+    mov dl, [r10+rax]
+    cmp dl, [r8+rax]
+    jne .cd
+    test dl, dl
+    jz .put
+    inc rax
+    jmp .c
+.cd:
+    jb .put
+    mov [r12+r9*8], r10
+    dec r9
+    jmp .j
+.put:
+    mov [r12+r9*8], r8
+    inc rcx
+    jmp .i
+.done:
+    mov rax, r15
+    mov rdx, r12
+    add rsp, 48
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+section .bss
+finddata resb 320               ; WIN32_FIND_DATAA

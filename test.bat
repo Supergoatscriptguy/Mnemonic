@@ -17,6 +17,8 @@ for %%t in (bpetrain tokenize tokshow) do (
 for %%t in (gpuinfo gpubench) do (
     call .\build.bat gpu\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
+call .\build.bat train\train >nul || (echo build failed: train& set BAD=1)
+call .\build.bat test\resume >nul || (echo build failed: resume& set BAD=1)
 if %BAD%==1 goto done
 
 bin\cpuinfo.exe
@@ -41,6 +43,8 @@ echo == gradients
 bin\grad.exe || set BAD=1
 echo == fast kernels vs naive
 bin\model.exe || set BAD=1
+echo == stop and resume training
+bin\resume.exe || set BAD=1
 
 :done
 echo.

@@ -192,18 +192,20 @@ printer print_hex, fmt_hex      ; rcx = value, edx = digits
 printer print_fixed, fmt_fixed  ; xmm0 = value, edx = decimals
 printer print_sci, fmt_sci      ; xmm0 = value, edx = decimals
 
-; rcx = message. prints it with GetLastError and exits
+; rcx = message. prints it with GetLastError and exits. never returns, so it can
+; realign the stack and not care how it was reached
 global fatal
 fatal:
-    sub rsp, 40
-    mov [rsp+48], rcx           ; our home slots
+    and rsp, -16
+    sub rsp, 48
+    mov [rsp+32], rcx
     call GetLastError
-    mov [rsp+56], rax
+    mov [rsp+40], rax
     say 13, 10, "error: "
-    mov rcx, [rsp+48]
+    mov rcx, [rsp+32]
     call print_z
     say " (last error "
-    mov rcx, [rsp+56]
+    mov rcx, [rsp+40]
     call print_dec
     say ")", 13, 10
     call con_restore
