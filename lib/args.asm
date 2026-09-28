@@ -6,7 +6,7 @@ bits 64
 
 extern GetCommandLineA
 
-MAXARGS equ 64
+MAXARGS equ 1024
 MAXCFG  equ 256
 
 section .bss

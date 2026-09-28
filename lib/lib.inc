@@ -5,7 +5,7 @@ extern lib_init, con_init, con_restore, con_tty, con_out
 extern print, print_z, print_dec, print_int, print_hex, print_fixed, print_sci, fatal
 ; fmt.asm
 extern fmt_str, fmt_dec, fmt_dec0, fmt_int, fmt_hex, fmt_fixed, fmt_sci, fmt_count, fmt_hms
-extern parse_int, parse_float
+extern parse_int, parse_float, utf8_ok
 ; cpu.asm
 extern cpu_detect, cpu_feat, cpu_brand
 ; mem.asm

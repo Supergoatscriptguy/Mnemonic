@@ -13,6 +13,7 @@ rem not LINK - link.exe reads %LINK% as extra command line options
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe`) do set LINKER=%%i
 
 if not exist build\lib mkdir build\lib
+if not exist build\mod mkdir build\mod
 if not exist bin mkdir bin
 set ASM="%NASM%" -f win64 -g -F cv8 -I lib/
 
@@ -30,9 +31,12 @@ set USES=
 set LIBS=
 for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; uses:" "%SRC%"') do set USES=%%b
 for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; libs:" "%SRC%"') do set LIBS=%%b
+rem module objects are named after their whole path, test\tok and tokenizer\tok can't collide
 for %%m in (%USES%) do (
-    %ASM% -o build\%%~nm.obj %%m.asm || goto fail
-    set OBJS=!OBJS! build\%%~nm.obj
+    set MOD=%%m
+    set MOD=!MOD:\=_!
+    %ASM% -o build\mod\!MOD!.obj %%m.asm || goto fail
+    set OBJS=!OBJS! build\mod\!MOD!.obj
 )
 
 %ASM% -o build\%NAME%.obj "%SRC%" || goto fail

@@ -451,3 +451,53 @@ parse_float:
 .ret:
     mov rax, rcx
     ret
+
+; rcx = text, rdx = len. eax = 1 if it's valid utf-8 (structure only, no overlong/surrogate
+; checks). touches rax, rcx, rdx, r8, r10
+global utf8_ok
+utf8_ok:
+    lea r8, [rcx+rdx]
+    mov r10, 0x8080808080808080
+.ascii:
+    lea rax, [rcx+8]
+    cmp rax, r8
+    ja .tail
+    test [rcx], r10
+    jnz .tail
+    add rcx, 8
+    jmp .ascii
+.tail:
+    cmp rcx, r8
+    jae .ok
+    movzx eax, byte [rcx]
+    inc rcx
+    cmp eax, 0x80
+    jb .ascii
+    cmp eax, 0xc2
+    jb .no                      ; stray continuation byte, or overlong 2 byte
+    mov edx, 1
+    cmp eax, 0xe0
+    jb .cont
+    inc edx
+    cmp eax, 0xf0
+    jb .cont
+    inc edx
+    cmp eax, 0xf5
+    jae .no
+.cont:
+    cmp rcx, r8
+    jae .no
+    movzx eax, byte [rcx]
+    and eax, 0xc0
+    cmp eax, 0x80
+    jne .no
+    inc rcx
+    dec edx
+    jnz .cont
+    jmp .ascii
+.ok:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
