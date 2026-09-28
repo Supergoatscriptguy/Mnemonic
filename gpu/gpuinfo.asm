@@ -8,6 +8,7 @@ bits 64
 
 extern ExitProcess
 extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_bench, ptx_bench_end
+extern ptx_ops, ptx_ops_end, ptx_attn, ptx_attn_end
 
 section .text
 
@@ -168,12 +169,30 @@ start:
     kinfo k_ref, 256
     kinfo k_mma1, 32
     kinfo k_tc, 256
+    kinfo k_mmref, 256
     lea rcx, [ptx_bench]
     lea rdx, [ptx_bench_end]
     sub rdx, rcx
     call gpu_module
     mov rbx, rax
     kinfo k_peak, 256
+    lea rcx, [ptx_ops]
+    lea rdx, [ptx_ops_end]
+    sub rdx, rcx
+    call gpu_module
+    mov rbx, rax
+    kinfo k_rms, 256
+    kinfo k_rmsb, 256
+    kinfo k_xent, 256
+    kinfo k_adamw, 256
+    lea rcx, [ptx_attn]
+    lea rdx, [ptx_attn_end]
+    sub rdx, rcx
+    call gpu_module
+    mov rbx, rax
+    kinfo k_ffwd, 128
+    kinfo k_fdq, 128
+    kinfo k_fdkv, 128
     call con_restore
     xor ecx, ecx
     call ExitProcess
@@ -315,6 +334,14 @@ k_ref    db "gemm_ref", 0
 k_mma1   db "gemm_mma1", 0
 k_tc     db "gemm_tc", 0
 k_peak   db "mma_peak", 0
+k_mmref  db "mm_ref", 0
+k_rms    db "rmsnorm", 0
+k_rmsb   db "rmsnorm_bwd", 0
+k_xent   db "xent", 0
+k_adamw  db "adamw", 0
+k_ffwd   db "flash_fwd", 0
+k_fdq    db "flash_dq", 0
+k_fdkv   db "flash_dkv", 0
 section .text
 
 ; ecx = number, -1 prints as ?

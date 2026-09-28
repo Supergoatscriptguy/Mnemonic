@@ -38,6 +38,10 @@ kn_attsm   db "att_softmax", 0
 kn_attmix  db "att_mix", 0
 kn_attds   db "att_ds", 0
 kn_attdkv  db "att_dkv", 0
+kn_ffwd    db "flash_fwd", 0
+kn_attnd   db "attn_d", 0
+kn_fdq     db "flash_dq", 0
+kn_fdkv    db "flash_dkv", 0
 kn_mmref   db "mm_ref", 0
 kn_gemmtc  db "gemm_tc", 0
 kn_f2bf    db "f2bf", 0
@@ -52,6 +56,7 @@ ck_ctx     db "ctx", 0
 ck_micro   db "micro", 0
 ck_rope    db "rope_base", 0
 e_heads    db "n_head has to be a multiple of n_kv_head, and d_model of n_head", 0
+e_fast     db "the fast kernels need head dim 64, ctx a multiple of 64, and d_model, ffn, vocab, heads*64 and micro*ctx multiples of 128", 0
 
 align 8
 c_rope     dq 10000.0
@@ -101,6 +106,7 @@ d_gn       resq 1               ; squared gradient norm
 d_rope     resq 1
 d_s1       resq 1               ; naive attention scratch, B*H*T*T f32 each
 d_s2       resq 1
+d_attd     resq 1               ; flash backward: dy . y per query and head
 e_op       resq 1               ; the embedding as a matmul operand
 vram       resq 1               ; bytes we allocated
 
@@ -122,6 +128,10 @@ k_attsm    resq 1
 k_attmix   resq 1
 k_attds    resq 1
 k_attdkv   resq 1
+k_ffwd     resq 1
+k_attnd    resq 1
+k_fdq      resq 1
+k_fdkv     resq 1
 mm_ref_f   resq 1
 mm_tc_f    resq 1
 k_f2bf     resq 1
@@ -277,7 +287,8 @@ fl_ops  dq kn_embed, k_embed, kn_embedb, k_embedb, kn_rms, k_rms, kn_rmsb, k_rms
         dq kn_rmsdw, k_rmsdw, kn_colsum, k_colsum, kn_rope, k_rope, kn_swi, k_swi
         dq kn_swib, k_swib, kn_xent, k_xent, kn_adamw, k_adamw, kn_sumsq, k_sumsq, 0
 fl_attn dq kn_attdot, k_attdot, kn_attsm, k_attsm, kn_attmix, k_attmix
-        dq kn_attds, k_attds, kn_attdkv, k_attdkv, 0
+        dq kn_attds, k_attds, kn_attdkv, k_attdkv
+        dq kn_ffwd, k_ffwd, kn_attnd, k_attnd, kn_fdq, k_fdq, kn_fdkv, k_fdkv, 0
 fl_gemm dq kn_mmref, mm_ref_f, kn_gemmtc, mm_tc_f, 0
 fl_basic dq kn_f2bf, k_f2bf, 0
 section .text
@@ -341,6 +352,30 @@ model_setup:
     mov rax, [mdl+MD_B]
     imul rax, [mdl+MD_T]
     mov [mdl+MD_M], rax
+    cmp dword [mdl_fast], 0
+    je .shapes
+    ; the fast kernels work in whole tiles: 64 wide heads, 64 rows of attention,
+    ; 128 x 128 matmul tiles, bf16 activations
+    cmp qword [mdl+MD_HD], 64
+    jne .badfast
+    test qword [mdl+MD_T], 63
+    jnz .badfast
+    cmp qword [mdl+MD_ES], 2
+    jne .badfast
+    mov eax, 127
+    test [mdl+MD_D], rax
+    jnz .badfast
+    test [mdl+MD_QD], rax
+    jnz .badfast
+    test [mdl+MD_QKV], rax
+    jnz .badfast
+    test [mdl+MD_F], rax
+    jnz .badfast
+    test [mdl+MD_V], rax
+    jnz .badfast
+    test [mdl+MD_M], rax
+    jnz .badfast
+.shapes:
     cvtsi2sd xmm0, qword [mdl+MD_HD]
     sqrtsd xmm0, xmm0
     movsd xmm1, [c_one]
@@ -530,6 +565,11 @@ model_setup:
     mov ecx, 256
     call dalloc
     mov [d_gn], rax
+    mov rcx, r12
+    imul rcx, [mdl+MD_H]
+    shl rcx, 2
+    call dalloc
+    mov [d_attd], rax
     mov rcx, [mdl+MD_T]
     imul rcx, [mdl+MD_HD]
     shl rcx, 2                  ; T * hd/2 * (cos, sin) f32
@@ -636,6 +676,9 @@ model_setup:
     ret
 .badheads:
     lea rcx, [e_heads]
+    call fatal
+.badfast:
+    lea rcx, [e_fast]
     call fatal
 
 ; rcx = param offset, rdx = LP slot, rdi = this layer's entry. the matmul operand
@@ -1017,10 +1060,38 @@ att_args:
     imul rcx, [cur_t]
 %endmacro
 
+; grid for the flash kernels: (T/64, heads, B), blocks of 128. ecx = heads
+flashgrid:
+    mov eax, [cur_t]
+    shr eax, 6
+    mov [kl+KL_GX], eax
+    mov [kl+KL_GY], ecx
+    mov eax, [cur_b]
+    mov [kl+KL_GZ], eax
+    mov dword [kl+KL_BX], 128
+    mov dword [kl+KL_BY], 1
+    mov dword [kl+KL_BZ], 1
+    lea rcx, [kl]
+    jmp gpu_launch
+
 ; rsi = layer. y and lse from the qkv
 attn_fwd:
     sub rsp, 40
-    ; the fast path plugs in here
+    cmp dword [mdl_fast], 0
+    je .naive
+    KF k_ffwd
+    karg 0, [rsi+LP_QKV]
+    karg 1, [rsi+LP_Y]
+    karg 2, [rsi+LP_LSE]
+    karg 3, [cur_t]
+    karg 4, [mdl+MD_H]
+    karg 5, [mdl+MD_KVH]
+    kargf 6, [scale]
+    mov ecx, [mdl+MD_H]
+    call flashgrid
+    add rsp, 40
+    ret
+.naive:
     KF k_attdot
     mov rax, [rsi+LP_QKV]
     karg 0, rax
@@ -1057,6 +1128,37 @@ attn_fwd:
 ; rsi = layer. dqkv from dy
 attn_bwd:
     sub rsp, 40
+    cmp dword [mdl_fast], 0
+    je .naive
+    KF k_attnd
+    karg 0, [d_dy]
+    karg 1, [rsi+LP_Y]
+    karg 2, [d_attd]
+    karg 3, [cur_m]
+    karg 4, [cur_t]
+    karg 5, [mdl+MD_H]
+    mov rcx, [cur_m]
+    imul rcx, [mdl+MD_H]
+    call lin
+    ; dq, then dk and dv. same arguments for both
+    KF k_fdq
+    karg 0, [rsi+LP_QKV]
+    karg 1, [d_dy]
+    karg 2, [rsi+LP_LSE]
+    karg 3, [d_attd]
+    karg 4, [d_dqkv]
+    karg 5, [cur_t]
+    karg 6, [mdl+MD_H]
+    karg 7, [mdl+MD_KVH]
+    kargf 8, [scale]
+    mov ecx, [mdl+MD_H]
+    call flashgrid
+    KF k_fdkv
+    mov ecx, [mdl+MD_KVH]
+    call flashgrid
+    add rsp, 40
+    ret
+.naive:
     ; P again: scores, then softmax against the saved lse
     KF k_attdot
     mov rax, [rsi+LP_QKV]

@@ -486,3 +486,1371 @@ hd:
 done:
     ret;
 }
+
+// flash attention, forward. hd = 64, T a multiple of 64. never writes the T x T
+// scores: one block of 4 warps takes 64 queries of one head, each warp 16 of
+// them, and walks the key blocks up to the diagonal keeping a running max and sum
+// (the online softmax), all in registers.
+//  - S = Q K^T and O += P V on the tensor cores (mma m16n8k16, bf16 in, f32 acc)
+//  - K and V tiles stream through shared memory with cp.async, two stages
+//  - rows are 64 bf16 padded to 72 (144 bytes): 8 ldmatrix rows hit 8 different
+//    4-bank groups
+//  - the softmax works in log2 units (ex2 is what the hardware has)
+//  - the accumulator layout of two neighbouring 8-key tiles is exactly the A
+//    fragment layout for 16 keys, so P goes from S to the PV mma without leaving
+//    the registers. V is the B operand stored [key][hd], so ldmatrix.trans
+// grid (T/64, H, B), block 128. the last query blocks have the most keys, they go first
+.visible .entry flash_fwd(
+    .param .u64 pqkv,
+    .param .u64 py,
+    .param .u64 plse,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .f32 pscale)
+{
+    .shared .align 16 .b8 sm[46080];            // Q 9216, then 2 x (K 9216, V 9216)
+    .reg .pred  %p, %pd;
+    .reg .b32   %r<64>;
+    .reg .b64   %rd<24>;
+    .reg .f32   %f<24>;
+    .reg .f32   %s<32>;                         // scores/probabilities, tile nt j is s[4nt + j]
+    .reg .f32   %o<32>;                         // output accumulator, hd tile nt j is o[4nt + j]
+    .reg .b32   %q<16>;                         // Q fragments, k step kk is q[4kk .. 4kk+3]
+    .reg .b32   %k<4>;
+    .reg .b32   %a<4>;
+
+    ld.param.u32    %r1, [pt];
+    ld.param.u32    %r2, [ph];
+    ld.param.u32    %r3, [pkvh];
+    ld.param.f32    %f1, [pscale];
+    mul.f32         %f1, %f1, 0f3FB8AA3B;       // scale * log2(e)
+    mov.u32         %r4, %tid.x;
+    shr.u32         %r5, %r4, 5;                // warp
+    and.b32         %r6, %r4, 31;               // lane
+    shr.u32         %r7, %r6, 2;                // g
+    and.b32         %r8, %r6, 3;                // t
+    mov.u32         %r9, %nctaid.x;
+    mov.u32         %r10, %ctaid.x;
+    sub.u32         %r9, %r9, %r10;
+    sub.u32         %r9, %r9, 1;                // query block, heaviest first
+    mov.u32         %r11, %ctaid.y;             // h
+    mov.u32         %r12, %ctaid.z;             // b
+    div.u32         %r13, %r2, %r3;
+    div.u32         %r13, %r11, %r13;           // kv head
+    shl.b32         %r14, %r2, 6;               // QD
+    shl.b32         %r15, %r3, 6;               // KVD
+    shl.b32         %r16, %r15, 1;
+    add.u32         %r16, %r16, %r14;           // QKV
+    mul.wide.u32    %rd1, %r16, 2;              // row bytes
+    shl.b64         %rd2, %rd1, 4;              // 16 rows
+    shl.b64         %rd3, %rd1, 6;              // 64 rows, one block
+    mul.lo.u32      %r17, %r12, %r1;            // b*T
+
+    // copying: thread takes rows tid/8 + 16i, 8 bf16 at (tid%8)*8
+    shr.u32         %r18, %r4, 3;
+    and.b32         %r19, %r4, 7;
+    shl.b32         %r19, %r19, 3;
+    mov.u32         %r20, sm;
+    mad.lo.u32      %r21, %r18, 144, %r20;
+    shl.b32         %r22, %r19, 1;
+    add.u32         %r21, %r21, %r22;           // shared dst, Q area
+    ld.param.u64    %rd4, [pqkv];
+    shl.b32         %r23, %r9, 6;               // q0 = qb*64
+    add.u32         %r24, %r17, %r23;
+    add.u32         %r24, %r24, %r18;
+    mul.lo.u32      %r25, %r24, %r16;
+    shl.b32         %r26, %r11, 6;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd5, %r25, 2;
+    add.u64         %rd5, %rd4, %rd5;           // global Q
+    add.u32         %r24, %r17, %r18;
+    mul.lo.u32      %r25, %r24, %r16;
+    add.u32         %r25, %r25, %r14;
+    shl.b32         %r26, %r13, 6;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd6, %r25, 2;
+    add.u64         %rd6, %rd4, %rd6;           // global K, key block 0
+    mul.wide.u32    %rd7, %r15, 2;
+    add.u64         %rd7, %rd6, %rd7;           // global V (KVD further along)
+
+    cp.async.cg.shared.global [%r21], [%rd5], 16;
+    add.u64         %rd8, %rd5, %rd2;
+    cp.async.cg.shared.global [%r21+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+6912], [%rd8], 16;
+    add.u32         %r27, %r21, 9216;           // stage 0 K
+    cp.async.cg.shared.global [%r27], [%rd6], 16;
+    add.u64         %rd8, %rd6, %rd2;
+    cp.async.cg.shared.global [%r27+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r27+9216], [%rd7], 16;
+    add.u64         %rd8, %rd7, %rd2;
+    cp.async.cg.shared.global [%r27+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+16128], [%rd8], 16;
+    cp.async.commit_group;
+    add.u64         %rd6, %rd6, %rd3;           // next key block
+    add.u64         %rd7, %rd7, %rd3;
+
+    // ldmatrix bases. Q: row w*16 + lane%16, col (lane/16)*8
+    and.b32         %r28, %r6, 15;
+    mad.lo.u32      %r28, %r5, 16, %r28;
+    mad.lo.u32      %r28, %r28, 144, %r20;
+    shr.u32         %r29, %r6, 4;
+    shl.b32         %r30, %r29, 4;
+    add.u32         %r28, %r28, %r30;           // aQ
+    // K (B, [key][hd]): key lane%8 + (lane/16)*8, hd ((lane/8)%2)*8. + p*2304 + kk*32
+    and.b32         %r31, %r6, 7;
+    shl.b32         %r32, %r29, 3;
+    add.u32         %r32, %r32, %r31;
+    shr.u32         %r33, %r6, 3;
+    and.b32         %r33, %r33, 1;
+    mad.lo.u32      %r34, %r32, 144, %r20;
+    shl.b32         %r35, %r33, 4;
+    add.u32         %r34, %r34, %r35;
+    add.u32         %r34, %r34, 9216;           // aK, stage 0
+    // V (B transposed): key lane%8 + ((lane/8)%2)*8, hd (lane/16)*8. + kk*2304 + p*32
+    shl.b32         %r36, %r33, 3;
+    add.u32         %r36, %r36, %r31;
+    mad.lo.u32      %r37, %r36, 144, %r20;
+    shl.b32         %r38, %r29, 4;
+    add.u32         %r37, %r37, %r38;
+    add.u32         %r37, %r37, 18432;          // aV, stage 0
+
+    // mask bookkeeping for the diagonal block: rows w*16 + g (+8) minus 2t
+    mad.lo.u32      %r39, %r5, 16, %r7;
+    shl.b32         %r40, %r8, 1;
+    sub.s32         %r41, %r39, %r40;           // d0
+    add.s32         %r42, %r41, 8;              // d1
+
+    mov.f32         %f2, 0fFF800000;            // m, row g
+    mov.f32         %f3, 0fFF800000;            // m, row g+8
+    mov.f32         %f4, 0f00000000;            // l (this thread's part)
+    mov.f32         %f5, 0f00000000;
+    mov.f32         %f0, 0f00000000;
+    mov.f32 %o0, 0f00000000;  mov.f32 %o1, 0f00000000;  mov.f32 %o2, 0f00000000;  mov.f32 %o3, 0f00000000;
+    mov.f32 %o4, 0f00000000;  mov.f32 %o5, 0f00000000;  mov.f32 %o6, 0f00000000;  mov.f32 %o7, 0f00000000;
+    mov.f32 %o8, 0f00000000;  mov.f32 %o9, 0f00000000;  mov.f32 %o10, 0f00000000; mov.f32 %o11, 0f00000000;
+    mov.f32 %o12, 0f00000000; mov.f32 %o13, 0f00000000; mov.f32 %o14, 0f00000000; mov.f32 %o15, 0f00000000;
+    mov.f32 %o16, 0f00000000; mov.f32 %o17, 0f00000000; mov.f32 %o18, 0f00000000; mov.f32 %o19, 0f00000000;
+    mov.f32 %o20, 0f00000000; mov.f32 %o21, 0f00000000; mov.f32 %o22, 0f00000000; mov.f32 %o23, 0f00000000;
+    mov.f32 %o24, 0f00000000; mov.f32 %o25, 0f00000000; mov.f32 %o26, 0f00000000; mov.f32 %o27, 0f00000000;
+    mov.f32 %o28, 0f00000000; mov.f32 %o29, 0f00000000; mov.f32 %o30, 0f00000000; mov.f32 %o31, 0f00000000;
+
+    mov.u32         %r43, 0;                    // key block
+kloop:
+    // next key block into the other stage
+    setp.ge.u32     %p, %r43, %r9;
+    @%p bra         last;
+    add.u32         %r44, %r43, 1;
+    and.b32         %r44, %r44, 1;
+    mad.lo.u32      %r45, %r44, 18432, %r21;
+    add.u32         %r45, %r45, 9216;
+    cp.async.cg.shared.global [%r45], [%rd6], 16;
+    add.u64         %rd8, %rd6, %rd2;
+    cp.async.cg.shared.global [%r45+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r45+9216], [%rd7], 16;
+    add.u64         %rd8, %rd7, %rd2;
+    cp.async.cg.shared.global [%r45+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+16128], [%rd8], 16;
+    cp.async.commit_group;
+    add.u64         %rd6, %rd6, %rd3;
+    add.u64         %rd7, %rd7, %rd3;
+    cp.async.wait_group 1;
+    bra             ready;
+last:
+    cp.async.wait_group 0;
+ready:
+    bar.sync        0;
+    setp.ne.u32     %p, %r43, 0;
+    @%p bra         haveq;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q0, %q1, %q2, %q3}, [%r28];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q4, %q5, %q6, %q7}, [%r28+32];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q8, %q9, %q10, %q11}, [%r28+64];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q12, %q13, %q14, %q15}, [%r28+96];
+haveq:
+    and.b32         %r46, %r43, 1;
+    mul.lo.u32      %r46, %r46, 18432;
+    add.u32         %r47, %r34, %r46;           // aK this stage
+    add.u32         %r48, %r37, %r46;           // aV
+
+    // S = Q K^T. key pair p (keys 16p..16p+15) is tiles 2p, 2p+1
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q0, %q1, %q2, %q3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q0, %q1, %q2, %q3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q4, %q5, %q6, %q7}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q4, %q5, %q6, %q7}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q8, %q9, %q10, %q11}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q8, %q9, %q10, %q11}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q12, %q13, %q14, %q15}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q12, %q13, %q14, %q15}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+2304];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s8, %s9, %s10, %s11}, {%q0, %q1, %q2, %q3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s12, %s13, %s14, %s15}, {%q0, %q1, %q2, %q3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+2336];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s8, %s9, %s10, %s11}, {%q4, %q5, %q6, %q7}, {%k0, %k1}, {%s8, %s9, %s10, %s11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s12, %s13, %s14, %s15}, {%q4, %q5, %q6, %q7}, {%k2, %k3}, {%s12, %s13, %s14, %s15};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+2368];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s8, %s9, %s10, %s11}, {%q8, %q9, %q10, %q11}, {%k0, %k1}, {%s8, %s9, %s10, %s11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s12, %s13, %s14, %s15}, {%q8, %q9, %q10, %q11}, {%k2, %k3}, {%s12, %s13, %s14, %s15};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+2400];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s8, %s9, %s10, %s11}, {%q12, %q13, %q14, %q15}, {%k0, %k1}, {%s8, %s9, %s10, %s11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s12, %s13, %s14, %s15}, {%q12, %q13, %q14, %q15}, {%k2, %k3}, {%s12, %s13, %s14, %s15};
+
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+4608];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s16, %s17, %s18, %s19}, {%q0, %q1, %q2, %q3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s20, %s21, %s22, %s23}, {%q0, %q1, %q2, %q3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+4640];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s16, %s17, %s18, %s19}, {%q4, %q5, %q6, %q7}, {%k0, %k1}, {%s16, %s17, %s18, %s19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s20, %s21, %s22, %s23}, {%q4, %q5, %q6, %q7}, {%k2, %k3}, {%s20, %s21, %s22, %s23};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+4672];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s16, %s17, %s18, %s19}, {%q8, %q9, %q10, %q11}, {%k0, %k1}, {%s16, %s17, %s18, %s19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s20, %s21, %s22, %s23}, {%q8, %q9, %q10, %q11}, {%k2, %k3}, {%s20, %s21, %s22, %s23};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+4704];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s16, %s17, %s18, %s19}, {%q12, %q13, %q14, %q15}, {%k0, %k1}, {%s16, %s17, %s18, %s19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s20, %s21, %s22, %s23}, {%q12, %q13, %q14, %q15}, {%k2, %k3}, {%s20, %s21, %s22, %s23};
+
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+6912];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s24, %s25, %s26, %s27}, {%q0, %q1, %q2, %q3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s28, %s29, %s30, %s31}, {%q0, %q1, %q2, %q3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+6944];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s24, %s25, %s26, %s27}, {%q4, %q5, %q6, %q7}, {%k0, %k1}, {%s24, %s25, %s26, %s27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s28, %s29, %s30, %s31}, {%q4, %q5, %q6, %q7}, {%k2, %k3}, {%s28, %s29, %s30, %s31};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+6976];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s24, %s25, %s26, %s27}, {%q8, %q9, %q10, %q11}, {%k0, %k1}, {%s24, %s25, %s26, %s27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s28, %s29, %s30, %s31}, {%q8, %q9, %q10, %q11}, {%k2, %k3}, {%s28, %s29, %s30, %s31};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+7008];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s24, %s25, %s26, %s27}, {%q12, %q13, %q14, %q15}, {%k0, %k1}, {%s24, %s25, %s26, %s27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s28, %s29, %s30, %s31}, {%q12, %q13, %q14, %q15}, {%k2, %k3}, {%s28, %s29, %s30, %s31};
+
+    // into log2 units
+    mul.f32 %s0, %s0, %f1;    mul.f32 %s1, %s1, %f1;    mul.f32 %s2, %s2, %f1;    mul.f32 %s3, %s3, %f1;
+    mul.f32 %s4, %s4, %f1;    mul.f32 %s5, %s5, %f1;    mul.f32 %s6, %s6, %f1;    mul.f32 %s7, %s7, %f1;
+    mul.f32 %s8, %s8, %f1;    mul.f32 %s9, %s9, %f1;    mul.f32 %s10, %s10, %f1;  mul.f32 %s11, %s11, %f1;
+    mul.f32 %s12, %s12, %f1;  mul.f32 %s13, %s13, %f1;  mul.f32 %s14, %s14, %f1;  mul.f32 %s15, %s15, %f1;
+    mul.f32 %s16, %s16, %f1;  mul.f32 %s17, %s17, %f1;  mul.f32 %s18, %s18, %f1;  mul.f32 %s19, %s19, %f1;
+    mul.f32 %s20, %s20, %f1;  mul.f32 %s21, %s21, %f1;  mul.f32 %s22, %s22, %f1;  mul.f32 %s23, %s23, %f1;
+    mul.f32 %s24, %s24, %f1;  mul.f32 %s25, %s25, %f1;  mul.f32 %s26, %s26, %f1;  mul.f32 %s27, %s27, %f1;
+    mul.f32 %s28, %s28, %f1;  mul.f32 %s29, %s29, %f1;  mul.f32 %s30, %s30, %f1;  mul.f32 %s31, %s31, %f1;
+
+    // the diagonal block: key nt*8 + 2t (+1) after query row d0 (d1 for row g+8) is masked
+    setp.ne.u32     %pd, %r43, %r9;
+    @%pd bra        nomask;
+    setp.lt.s32 %p, %r41, 0;   @%p mov.f32 %s0, 0fFF800000;   setp.lt.s32 %p, %r41, 1;   @%p mov.f32 %s1, 0fFF800000;
+    setp.lt.s32 %p, %r42, 0;   @%p mov.f32 %s2, 0fFF800000;   setp.lt.s32 %p, %r42, 1;   @%p mov.f32 %s3, 0fFF800000;
+    setp.lt.s32 %p, %r41, 8;   @%p mov.f32 %s4, 0fFF800000;   setp.lt.s32 %p, %r41, 9;   @%p mov.f32 %s5, 0fFF800000;
+    setp.lt.s32 %p, %r42, 8;   @%p mov.f32 %s6, 0fFF800000;   setp.lt.s32 %p, %r42, 9;   @%p mov.f32 %s7, 0fFF800000;
+    setp.lt.s32 %p, %r41, 16;  @%p mov.f32 %s8, 0fFF800000;   setp.lt.s32 %p, %r41, 17;  @%p mov.f32 %s9, 0fFF800000;
+    setp.lt.s32 %p, %r42, 16;  @%p mov.f32 %s10, 0fFF800000;  setp.lt.s32 %p, %r42, 17;  @%p mov.f32 %s11, 0fFF800000;
+    setp.lt.s32 %p, %r41, 24;  @%p mov.f32 %s12, 0fFF800000;  setp.lt.s32 %p, %r41, 25;  @%p mov.f32 %s13, 0fFF800000;
+    setp.lt.s32 %p, %r42, 24;  @%p mov.f32 %s14, 0fFF800000;  setp.lt.s32 %p, %r42, 25;  @%p mov.f32 %s15, 0fFF800000;
+    setp.lt.s32 %p, %r41, 32;  @%p mov.f32 %s16, 0fFF800000;  setp.lt.s32 %p, %r41, 33;  @%p mov.f32 %s17, 0fFF800000;
+    setp.lt.s32 %p, %r42, 32;  @%p mov.f32 %s18, 0fFF800000;  setp.lt.s32 %p, %r42, 33;  @%p mov.f32 %s19, 0fFF800000;
+    setp.lt.s32 %p, %r41, 40;  @%p mov.f32 %s20, 0fFF800000;  setp.lt.s32 %p, %r41, 41;  @%p mov.f32 %s21, 0fFF800000;
+    setp.lt.s32 %p, %r42, 40;  @%p mov.f32 %s22, 0fFF800000;  setp.lt.s32 %p, %r42, 41;  @%p mov.f32 %s23, 0fFF800000;
+    setp.lt.s32 %p, %r41, 48;  @%p mov.f32 %s24, 0fFF800000;  setp.lt.s32 %p, %r41, 49;  @%p mov.f32 %s25, 0fFF800000;
+    setp.lt.s32 %p, %r42, 48;  @%p mov.f32 %s26, 0fFF800000;  setp.lt.s32 %p, %r42, 49;  @%p mov.f32 %s27, 0fFF800000;
+    setp.lt.s32 %p, %r41, 56;  @%p mov.f32 %s28, 0fFF800000;  setp.lt.s32 %p, %r41, 57;  @%p mov.f32 %s29, 0fFF800000;
+    setp.lt.s32 %p, %r42, 56;  @%p mov.f32 %s30, 0fFF800000;  setp.lt.s32 %p, %r42, 57;  @%p mov.f32 %s31, 0fFF800000;
+nomask:
+
+    // new row maxes (row g in f6, row g+8 in f7), shared by the 4 threads of the row
+    max.f32 %f6, %s0, %s1;    max.f32 %f6, %f6, %s4;    max.f32 %f6, %f6, %s5;    max.f32 %f6, %f6, %s8;
+    max.f32 %f6, %f6, %s9;    max.f32 %f6, %f6, %s12;   max.f32 %f6, %f6, %s13;   max.f32 %f6, %f6, %s16;
+    max.f32 %f6, %f6, %s17;   max.f32 %f6, %f6, %s20;   max.f32 %f6, %f6, %s21;   max.f32 %f6, %f6, %s24;
+    max.f32 %f6, %f6, %s25;   max.f32 %f6, %f6, %s28;   max.f32 %f6, %f6, %s29;
+    max.f32 %f7, %s2, %s3;    max.f32 %f7, %f7, %s6;    max.f32 %f7, %f7, %s7;    max.f32 %f7, %f7, %s10;
+    max.f32 %f7, %f7, %s11;   max.f32 %f7, %f7, %s14;   max.f32 %f7, %f7, %s15;   max.f32 %f7, %f7, %s18;
+    max.f32 %f7, %f7, %s19;   max.f32 %f7, %f7, %s22;   max.f32 %f7, %f7, %s23;   max.f32 %f7, %f7, %s26;
+    max.f32 %f7, %f7, %s27;   max.f32 %f7, %f7, %s30;   max.f32 %f7, %f7, %s31;
+    shfl.sync.bfly.b32 %f8, %f6, 1, 31, 0xffffffff;
+    max.f32         %f6, %f6, %f8;
+    shfl.sync.bfly.b32 %f8, %f6, 2, 31, 0xffffffff;
+    max.f32         %f6, %f6, %f8;
+    shfl.sync.bfly.b32 %f8, %f7, 1, 31, 0xffffffff;
+    max.f32         %f7, %f7, %f8;
+    shfl.sync.bfly.b32 %f8, %f7, 2, 31, 0xffffffff;
+    max.f32         %f7, %f7, %f8;
+    max.f32         %f6, %f6, %f2;
+    max.f32         %f7, %f7, %f3;
+    sub.f32         %f9, %f2, %f6;
+    ex2.approx.f32  %f9, %f9;                   // how much the old sums shrink
+    sub.f32         %f10, %f3, %f7;
+    ex2.approx.f32  %f10, %f10;
+    mov.f32         %f2, %f6;
+    mov.f32         %f3, %f7;
+
+    // p = 2^(s - m)
+    sub.f32 %s0, %s0, %f6;    sub.f32 %s1, %s1, %f6;    sub.f32 %s2, %s2, %f7;    sub.f32 %s3, %s3, %f7;
+    sub.f32 %s4, %s4, %f6;    sub.f32 %s5, %s5, %f6;    sub.f32 %s6, %s6, %f7;    sub.f32 %s7, %s7, %f7;
+    sub.f32 %s8, %s8, %f6;    sub.f32 %s9, %s9, %f6;    sub.f32 %s10, %s10, %f7;  sub.f32 %s11, %s11, %f7;
+    sub.f32 %s12, %s12, %f6;  sub.f32 %s13, %s13, %f6;  sub.f32 %s14, %s14, %f7;  sub.f32 %s15, %s15, %f7;
+    sub.f32 %s16, %s16, %f6;  sub.f32 %s17, %s17, %f6;  sub.f32 %s18, %s18, %f7;  sub.f32 %s19, %s19, %f7;
+    sub.f32 %s20, %s20, %f6;  sub.f32 %s21, %s21, %f6;  sub.f32 %s22, %s22, %f7;  sub.f32 %s23, %s23, %f7;
+    sub.f32 %s24, %s24, %f6;  sub.f32 %s25, %s25, %f6;  sub.f32 %s26, %s26, %f7;  sub.f32 %s27, %s27, %f7;
+    sub.f32 %s28, %s28, %f6;  sub.f32 %s29, %s29, %f6;  sub.f32 %s30, %s30, %f7;  sub.f32 %s31, %s31, %f7;
+    ex2.approx.f32 %s0, %s0;    ex2.approx.f32 %s1, %s1;    ex2.approx.f32 %s2, %s2;    ex2.approx.f32 %s3, %s3;
+    ex2.approx.f32 %s4, %s4;    ex2.approx.f32 %s5, %s5;    ex2.approx.f32 %s6, %s6;    ex2.approx.f32 %s7, %s7;
+    ex2.approx.f32 %s8, %s8;    ex2.approx.f32 %s9, %s9;    ex2.approx.f32 %s10, %s10;  ex2.approx.f32 %s11, %s11;
+    ex2.approx.f32 %s12, %s12;  ex2.approx.f32 %s13, %s13;  ex2.approx.f32 %s14, %s14;  ex2.approx.f32 %s15, %s15;
+    ex2.approx.f32 %s16, %s16;  ex2.approx.f32 %s17, %s17;  ex2.approx.f32 %s18, %s18;  ex2.approx.f32 %s19, %s19;
+    ex2.approx.f32 %s20, %s20;  ex2.approx.f32 %s21, %s21;  ex2.approx.f32 %s22, %s22;  ex2.approx.f32 %s23, %s23;
+    ex2.approx.f32 %s24, %s24;  ex2.approx.f32 %s25, %s25;  ex2.approx.f32 %s26, %s26;  ex2.approx.f32 %s27, %s27;
+    ex2.approx.f32 %s28, %s28;  ex2.approx.f32 %s29, %s29;  ex2.approx.f32 %s30, %s30;  ex2.approx.f32 %s31, %s31;
+    // l = l * c + this block's p (just this thread's columns, the row gets summed at the end)
+    mul.f32 %f4, %f4, %f9;
+    add.f32 %f4, %f4, %s0;    add.f32 %f4, %f4, %s1;    add.f32 %f4, %f4, %s4;    add.f32 %f4, %f4, %s5;
+    add.f32 %f4, %f4, %s8;    add.f32 %f4, %f4, %s9;    add.f32 %f4, %f4, %s12;   add.f32 %f4, %f4, %s13;
+    add.f32 %f4, %f4, %s16;   add.f32 %f4, %f4, %s17;   add.f32 %f4, %f4, %s20;   add.f32 %f4, %f4, %s21;
+    add.f32 %f4, %f4, %s24;   add.f32 %f4, %f4, %s25;   add.f32 %f4, %f4, %s28;   add.f32 %f4, %f4, %s29;
+    mul.f32 %f5, %f5, %f10;
+    add.f32 %f5, %f5, %s2;    add.f32 %f5, %f5, %s3;    add.f32 %f5, %f5, %s6;    add.f32 %f5, %f5, %s7;
+    add.f32 %f5, %f5, %s10;   add.f32 %f5, %f5, %s11;   add.f32 %f5, %f5, %s14;   add.f32 %f5, %f5, %s15;
+    add.f32 %f5, %f5, %s18;   add.f32 %f5, %f5, %s19;   add.f32 %f5, %f5, %s22;   add.f32 %f5, %f5, %s23;
+    add.f32 %f5, %f5, %s26;   add.f32 %f5, %f5, %s27;   add.f32 %f5, %f5, %s30;   add.f32 %f5, %f5, %s31;
+    // O shrinks the same way
+    mul.f32 %o0, %o0, %f9;    mul.f32 %o1, %o1, %f9;    mul.f32 %o2, %o2, %f10;   mul.f32 %o3, %o3, %f10;
+    mul.f32 %o4, %o4, %f9;    mul.f32 %o5, %o5, %f9;    mul.f32 %o6, %o6, %f10;   mul.f32 %o7, %o7, %f10;
+    mul.f32 %o8, %o8, %f9;    mul.f32 %o9, %o9, %f9;    mul.f32 %o10, %o10, %f10; mul.f32 %o11, %o11, %f10;
+    mul.f32 %o12, %o12, %f9;  mul.f32 %o13, %o13, %f9;  mul.f32 %o14, %o14, %f10; mul.f32 %o15, %o15, %f10;
+    mul.f32 %o16, %o16, %f9;  mul.f32 %o17, %o17, %f9;  mul.f32 %o18, %o18, %f10; mul.f32 %o19, %o19, %f10;
+    mul.f32 %o20, %o20, %f9;  mul.f32 %o21, %o21, %f9;  mul.f32 %o22, %o22, %f10; mul.f32 %o23, %o23, %f10;
+    mul.f32 %o24, %o24, %f9;  mul.f32 %o25, %o25, %f9;  mul.f32 %o26, %o26, %f10; mul.f32 %o27, %o27, %f10;
+    mul.f32 %o28, %o28, %f9;  mul.f32 %o29, %o29, %f9;  mul.f32 %o30, %o30, %f10; mul.f32 %o31, %o31, %f10;
+
+    // O += P V, 16 keys at a time (tiles 2kk, 2kk+1 of P are the A fragment)
+    cvt.rn.bf16x2.f32 %a0, %s1, %s0;
+    cvt.rn.bf16x2.f32 %a1, %s3, %s2;
+    cvt.rn.bf16x2.f32 %a2, %s5, %s4;
+    cvt.rn.bf16x2.f32 %a3, %s7, %s6;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o0, %o1, %o2, %o3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o0, %o1, %o2, %o3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o4, %o5, %o6, %o7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o4, %o5, %o6, %o7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o8, %o9, %o10, %o11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o8, %o9, %o10, %o11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o12, %o13, %o14, %o15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o12, %o13, %o14, %o15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o16, %o17, %o18, %o19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o16, %o17, %o18, %o19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o20, %o21, %o22, %o23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o20, %o21, %o22, %o23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o24, %o25, %o26, %o27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o24, %o25, %o26, %o27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o28, %o29, %o30, %o31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o28, %o29, %o30, %o31};
+
+    cvt.rn.bf16x2.f32 %a0, %s9, %s8;
+    cvt.rn.bf16x2.f32 %a1, %s11, %s10;
+    cvt.rn.bf16x2.f32 %a2, %s13, %s12;
+    cvt.rn.bf16x2.f32 %a3, %s15, %s14;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+2304];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o0, %o1, %o2, %o3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o0, %o1, %o2, %o3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o4, %o5, %o6, %o7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o4, %o5, %o6, %o7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+2336];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o8, %o9, %o10, %o11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o8, %o9, %o10, %o11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o12, %o13, %o14, %o15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o12, %o13, %o14, %o15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+2368];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o16, %o17, %o18, %o19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o16, %o17, %o18, %o19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o20, %o21, %o22, %o23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o20, %o21, %o22, %o23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+2400];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o24, %o25, %o26, %o27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o24, %o25, %o26, %o27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o28, %o29, %o30, %o31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o28, %o29, %o30, %o31};
+
+    cvt.rn.bf16x2.f32 %a0, %s17, %s16;
+    cvt.rn.bf16x2.f32 %a1, %s19, %s18;
+    cvt.rn.bf16x2.f32 %a2, %s21, %s20;
+    cvt.rn.bf16x2.f32 %a3, %s23, %s22;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+4608];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o0, %o1, %o2, %o3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o0, %o1, %o2, %o3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o4, %o5, %o6, %o7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o4, %o5, %o6, %o7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+4640];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o8, %o9, %o10, %o11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o8, %o9, %o10, %o11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o12, %o13, %o14, %o15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o12, %o13, %o14, %o15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+4672];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o16, %o17, %o18, %o19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o16, %o17, %o18, %o19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o20, %o21, %o22, %o23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o20, %o21, %o22, %o23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+4704];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o24, %o25, %o26, %o27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o24, %o25, %o26, %o27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o28, %o29, %o30, %o31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o28, %o29, %o30, %o31};
+
+    cvt.rn.bf16x2.f32 %a0, %s25, %s24;
+    cvt.rn.bf16x2.f32 %a1, %s27, %s26;
+    cvt.rn.bf16x2.f32 %a2, %s29, %s28;
+    cvt.rn.bf16x2.f32 %a3, %s31, %s30;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+6912];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o0, %o1, %o2, %o3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o0, %o1, %o2, %o3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o4, %o5, %o6, %o7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o4, %o5, %o6, %o7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+6944];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o8, %o9, %o10, %o11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o8, %o9, %o10, %o11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o12, %o13, %o14, %o15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o12, %o13, %o14, %o15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+6976];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o16, %o17, %o18, %o19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o16, %o17, %o18, %o19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o20, %o21, %o22, %o23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o20, %o21, %o22, %o23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+7008];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o24, %o25, %o26, %o27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o24, %o25, %o26, %o27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o28, %o29, %o30, %o31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o28, %o29, %o30, %o31};
+
+    bar.sync        0;                          // done with this stage before it refills
+    add.u32         %r43, %r43, 1;
+    setp.le.u32     %p, %r43, %r9;
+    @%p bra         kloop;
+
+    // finish the row sums across the 4 threads of each row, then O / l
+    shfl.sync.bfly.b32 %f8, %f4, 1, 31, 0xffffffff;
+    add.f32         %f4, %f4, %f8;
+    shfl.sync.bfly.b32 %f8, %f4, 2, 31, 0xffffffff;
+    add.f32         %f4, %f4, %f8;
+    shfl.sync.bfly.b32 %f8, %f5, 1, 31, 0xffffffff;
+    add.f32         %f5, %f5, %f8;
+    shfl.sync.bfly.b32 %f8, %f5, 2, 31, 0xffffffff;
+    add.f32         %f5, %f5, %f8;
+    rcp.rn.f32      %f11, %f4;
+    rcp.rn.f32      %f12, %f5;
+    mul.f32 %o0, %o0, %f11;   mul.f32 %o1, %o1, %f11;   mul.f32 %o2, %o2, %f12;   mul.f32 %o3, %o3, %f12;
+    mul.f32 %o4, %o4, %f11;   mul.f32 %o5, %o5, %f11;   mul.f32 %o6, %o6, %f12;   mul.f32 %o7, %o7, %f12;
+    mul.f32 %o8, %o8, %f11;   mul.f32 %o9, %o9, %f11;   mul.f32 %o10, %o10, %f12; mul.f32 %o11, %o11, %f12;
+    mul.f32 %o12, %o12, %f11; mul.f32 %o13, %o13, %f11; mul.f32 %o14, %o14, %f12; mul.f32 %o15, %o15, %f12;
+    mul.f32 %o16, %o16, %f11; mul.f32 %o17, %o17, %f11; mul.f32 %o18, %o18, %f12; mul.f32 %o19, %o19, %f12;
+    mul.f32 %o20, %o20, %f11; mul.f32 %o21, %o21, %f11; mul.f32 %o22, %o22, %f12; mul.f32 %o23, %o23, %f12;
+    mul.f32 %o24, %o24, %f11; mul.f32 %o25, %o25, %f11; mul.f32 %o26, %o26, %f12; mul.f32 %o27, %o27, %f12;
+    mul.f32 %o28, %o28, %f11; mul.f32 %o29, %o29, %f11; mul.f32 %o30, %o30, %f12; mul.f32 %o31, %o31, %f12;
+
+    // y rows q0 + w*16 + g (+8), cols h*64 + nt*8 + 2t
+    shl.b32         %r49, %r9, 6;
+    add.u32         %r49, %r49, %r39;           // query t for row g
+    add.u32         %r50, %r17, %r49;           // m
+    shl.b32         %r51, %r11, 6;
+    add.u32         %r51, %r51, %r40;
+    mad.lo.u32      %r52, %r50, %r14, %r51;
+    ld.param.u64    %rd9, [py];
+    mul.wide.u32    %rd10, %r52, 2;
+    add.u64         %rd10, %rd9, %rd10;         // row g
+    mul.wide.u32    %rd11, %r14, 16;
+    add.u64         %rd11, %rd10, %rd11;        // row g+8
+    cvt.rn.bf16x2.f32 %r53, %o1, %o0;
+    st.global.b32   [%rd10], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o3, %o2;
+    st.global.b32   [%rd11], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o5, %o4;
+    st.global.b32   [%rd10+16], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o7, %o6;
+    st.global.b32   [%rd11+16], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o9, %o8;
+    st.global.b32   [%rd10+32], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o11, %o10;
+    st.global.b32   [%rd11+32], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o13, %o12;
+    st.global.b32   [%rd10+48], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o15, %o14;
+    st.global.b32   [%rd11+48], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o17, %o16;
+    st.global.b32   [%rd10+64], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o19, %o18;
+    st.global.b32   [%rd11+64], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o21, %o20;
+    st.global.b32   [%rd10+80], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o23, %o22;
+    st.global.b32   [%rd11+80], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o25, %o24;
+    st.global.b32   [%rd10+96], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o27, %o26;
+    st.global.b32   [%rd11+96], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o29, %o28;
+    st.global.b32   [%rd10+112], %r53;
+    cvt.rn.bf16x2.f32 %r53, %o31, %o30;
+    st.global.b32   [%rd11+112], %r53;
+
+    // lse = (m + log2 l) ln 2, by the t == 0 thread of each row
+    setp.ne.u32     %p, %r8, 0;
+    @%p bra         done;
+    lg2.approx.f32  %f13, %f4;
+    add.f32         %f13, %f13, %f2;
+    mul.f32         %f13, %f13, 0f3F317218;
+    lg2.approx.f32  %f14, %f5;
+    add.f32         %f14, %f14, %f3;
+    mul.f32         %f14, %f14, 0f3F317218;
+    mad.lo.u32      %r54, %r12, %r2, %r11;      // b*H + h
+    mad.lo.u32      %r54, %r54, %r1, %r49;
+    ld.param.u64    %rd12, [plse];
+    mul.wide.u32    %rd13, %r54, 4;
+    add.u64         %rd12, %rd12, %rd13;
+    st.global.f32   [%rd12], %f13;
+    st.global.f32   [%rd12+32], %f14;
+done:
+    ret;
+}
+
+// attention backward needs D = dy . y per query and head (it's also sum_j P dP).
+// one thread per (row, head), 64 products each. same layout as lse: [B][H][T]
+.visible .entry attn_d(
+    .param .u64 pdy,
+    .param .u64 py,
+    .param .u64 pd,
+    .param .u32 pm,
+    .param .u32 pt,
+    .param .u32 ph)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<24>;
+    .reg .b64   %rd<12>;
+    .reg .f32   %f<8>;
+
+    ld.param.u32    %r1, [pm];
+    ld.param.u32    %r2, [pt];
+    ld.param.u32    %r3, [ph];
+    mov.u32         %r4, %ctaid.x;
+    mov.u32         %r5, %ntid.x;
+    mov.u32         %r6, %tid.x;
+    mad.lo.u32      %r7, %r4, %r5, %r6;
+    mul.lo.u32      %r8, %r1, %r3;
+    setp.ge.u32     %p, %r7, %r8;
+    @%p bra         done;
+    rem.u32         %r9, %r7, %r3;              // h
+    div.u32         %r10, %r7, %r3;             // m
+    // y and dy rows are QD = H*64 wide, so (m, h) starts at element i*64
+    mul.wide.u32    %rd1, %r7, 128;
+    ld.param.u64    %rd2, [pdy];
+    add.u64         %rd2, %rd2, %rd1;
+    ld.param.u64    %rd3, [py];
+    add.u64         %rd3, %rd3, %rd1;
+    mov.f32         %f1, 0f00000000;
+    mov.u32         %r11, 0;
+dl:
+    ld.global.b32   %r12, [%rd2];
+    ld.global.b32   %r13, [%rd3];
+    shl.b32         %r14, %r12, 16;
+    shl.b32         %r15, %r13, 16;
+    mov.b32         %f2, %r14;
+    mov.b32         %f3, %r15;
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    and.b32         %r14, %r12, 0xffff0000;
+    and.b32         %r15, %r13, 0xffff0000;
+    mov.b32         %f2, %r14;
+    mov.b32         %f3, %r15;
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    add.u64         %rd2, %rd2, 4;
+    add.u64         %rd3, %rd3, 4;
+    add.u32         %r11, %r11, 1;
+    setp.lt.u32     %p, %r11, 32;
+    @%p bra         dl;
+    div.u32         %r16, %r10, %r2;            // b
+    rem.u32         %r17, %r10, %r2;            // t
+    mad.lo.u32      %r18, %r16, %r3, %r9;
+    mad.lo.u32      %r18, %r18, %r2, %r17;
+    ld.param.u64    %rd4, [pd];
+    mul.wide.u32    %rd5, %r18, 4;
+    add.u64         %rd4, %rd4, %rd5;
+    st.global.f32   [%rd4], %f1;
+done:
+    ret;
+}
+
+// dQ for 64 queries of one head, walking the key blocks up to the diagonal.
+// Q and dO fragments stay in registers, K and V stream through two stages. per
+// 16 keys: S = Q K^T and dP = dO V^T (mma), P = 2^(S log2e/sqrt(hd) - lse log2e),
+// dS = P (dP - D), dQ += dS K (K as B transposed: ldmatrix.trans).
+// dq goes into the q part of dqkv, times 1/sqrt(hd).
+// grid (T/64, H, B), block 128
+.visible .entry flash_dq(
+    .param .u64 pqkv,
+    .param .u64 pdy,
+    .param .u64 plse,
+    .param .u64 pd,
+    .param .u64 pdq,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .f32 pscale)
+{
+    .shared .align 16 .b8 sm[36864];            // 2 stages of K 9216 + V 9216. Q, dO start in stage 1
+    .reg .pred  %p, %pd;
+    .reg .b32   %r<64>;
+    .reg .b64   %rd<24>;
+    .reg .f32   %f<24>;
+    .reg .f32   %s<8>;                          // S / P for 16 keys, tile nt j is s[4nt + j]
+    .reg .f32   %t<8>;                          // dP / dS
+    .reg .f32   %u<32>;                         // dQ, hd tile nt j is u[4nt + j]
+    .reg .b32   %q<16>;                         // Q fragments, k step kk is q[4kk ..]
+    .reg .b32   %e<16>;                         // dO fragments
+    .reg .b32   %k<4>;
+    .reg .b32   %a<4>;
+
+    ld.param.u32    %r1, [pt];
+    ld.param.u32    %r2, [ph];
+    ld.param.u32    %r3, [pkvh];
+    ld.param.f32    %f1, [pscale];
+    mul.f32         %f2, %f1, 0f3FB8AA3B;       // scale * log2(e)
+    mov.f32         %f0, 0f00000000;
+    mov.u32         %r4, %tid.x;
+    shr.u32         %r5, %r4, 5;
+    and.b32         %r6, %r4, 31;
+    shr.u32         %r7, %r6, 2;                // g
+    and.b32         %r8, %r6, 3;                // t
+    mov.u32         %r9, %nctaid.x;
+    mov.u32         %r10, %ctaid.x;
+    sub.u32         %r9, %r9, %r10;
+    sub.u32         %r9, %r9, 1;                // query block, heaviest first
+    mov.u32         %r11, %ctaid.y;             // h
+    mov.u32         %r12, %ctaid.z;             // b
+    div.u32         %r13, %r2, %r3;
+    div.u32         %r13, %r11, %r13;           // kv head
+    shl.b32         %r14, %r2, 6;               // QD
+    shl.b32         %r15, %r3, 6;               // KVD
+    shl.b32         %r16, %r15, 1;
+    add.u32         %r16, %r16, %r14;           // QKV
+    mul.wide.u32    %rd1, %r16, 2;
+    shl.b64         %rd2, %rd1, 4;              // 16 qkv rows
+    shl.b64         %rd3, %rd1, 6;              // 64
+    mul.wide.u32    %rd14, %r14, 32;            // 16 dy rows
+    mul.lo.u32      %r17, %r12, %r1;            // b*T
+
+    // copying: rows tid/8 + 16i, 8 bf16 at (tid%8)*8
+    shr.u32         %r18, %r4, 3;
+    and.b32         %r19, %r4, 7;
+    shl.b32         %r19, %r19, 3;
+    mov.u32         %r20, sm;
+    mad.lo.u32      %r21, %r18, 144, %r20;
+    shl.b32         %r22, %r19, 1;
+    add.u32         %r21, %r21, %r22;           // copy dst, stage 0 K
+    shl.b32         %r23, %r9, 6;               // q0
+    add.u32         %r24, %r17, %r23;
+    add.u32         %r24, %r24, %r18;
+    ld.param.u64    %rd4, [pqkv];
+    mul.lo.u32      %r25, %r24, %r16;
+    shl.b32         %r26, %r11, 6;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd5, %r25, 2;
+    add.u64         %rd5, %rd4, %rd5;           // Q
+    ld.param.u64    %rd15, [pdy];
+    mul.lo.u32      %r25, %r24, %r14;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd16, %r25, 2;
+    add.u64         %rd15, %rd15, %rd16;        // dO
+    add.u32         %r24, %r17, %r18;
+    mul.lo.u32      %r25, %r24, %r16;
+    add.u32         %r25, %r25, %r14;
+    shl.b32         %r26, %r13, 6;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd6, %r25, 2;
+    add.u64         %rd6, %rd4, %rd6;           // K, block 0
+    mul.wide.u32    %rd7, %r15, 2;
+    add.u64         %rd7, %rd6, %rd7;           // V
+
+    add.u32         %r27, %r21, 18432;
+    cp.async.cg.shared.global [%r27], [%rd5], 16;
+    add.u64         %rd8, %rd5, %rd2;
+    cp.async.cg.shared.global [%r27+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r27+9216], [%rd15], 16;
+    add.u64         %rd8, %rd15, %rd14;
+    cp.async.cg.shared.global [%r27+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd14;
+    cp.async.cg.shared.global [%r27+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd14;
+    cp.async.cg.shared.global [%r27+16128], [%rd8], 16;
+    cp.async.cg.shared.global [%r21], [%rd6], 16;
+    add.u64         %rd8, %rd6, %rd2;
+    cp.async.cg.shared.global [%r21+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r21+9216], [%rd7], 16;
+    add.u64         %rd8, %rd7, %rd2;
+    cp.async.cg.shared.global [%r21+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r21+16128], [%rd8], 16;
+    cp.async.commit_group;
+    add.u64         %rd6, %rd6, %rd3;
+    add.u64         %rd7, %rd7, %rd3;
+
+    // lse (into log2 units) and D for rows g and g+8
+    mad.lo.u32      %r39, %r5, 16, %r7;         // w*16 + g
+    mad.lo.u32      %r40, %r12, %r2, %r11;
+    mad.lo.u32      %r40, %r40, %r1, %r23;
+    add.u32         %r40, %r40, %r39;
+    mul.wide.u32    %rd9, %r40, 4;
+    ld.param.u64    %rd10, [plse];
+    add.u64         %rd10, %rd10, %rd9;
+    ld.global.f32   %f3, [%rd10];
+    ld.global.f32   %f4, [%rd10+32];
+    mul.f32         %f3, %f3, 0f3FB8AA3B;
+    mul.f32         %f4, %f4, 0f3FB8AA3B;
+    ld.param.u64    %rd11, [pd];
+    add.u64         %rd11, %rd11, %rd9;
+    ld.global.f32   %f5, [%rd11];
+    ld.global.f32   %f6, [%rd11+32];
+
+    // ldmatrix bases. A (Q, dO in stage 1): row w*16 + lane%16, col (lane/16)*8
+    and.b32         %r28, %r6, 15;
+    mad.lo.u32      %r28, %r5, 16, %r28;
+    mad.lo.u32      %r28, %r28, 144, %r20;
+    shr.u32         %r29, %r6, 4;
+    shl.b32         %r30, %r29, 4;
+    add.u32         %r28, %r28, %r30;
+    add.u32         %r28, %r28, 18432;
+    // B from [key][hd] (K for S, V for dP): key lane%8 + (lane/16)*8, hd ((lane/8)%2)*8
+    and.b32         %r31, %r6, 7;
+    shl.b32         %r32, %r29, 3;
+    add.u32         %r32, %r32, %r31;
+    shr.u32         %r33, %r6, 3;
+    and.b32         %r33, %r33, 1;
+    mad.lo.u32      %r34, %r32, 144, %r20;
+    shl.b32         %r35, %r33, 4;
+    add.u32         %r34, %r34, %r35;           // aK
+    // B transposed (K for dQ): key lane%8 + ((lane/8)%2)*8, hd (lane/16)*8
+    shl.b32         %r36, %r33, 3;
+    add.u32         %r36, %r36, %r31;
+    mad.lo.u32      %r37, %r36, 144, %r20;
+    shl.b32         %r38, %r29, 4;
+    add.u32         %r37, %r37, %r38;           // aKt
+
+    // mask: key 8nt + 2t (+1) of a chunk after row d0 (d1 for row g+8)
+    shl.b32         %r41, %r8, 1;
+    sub.s32         %r42, %r39, %r41;           // d0
+    add.s32         %r43, %r42, 8;              // d1
+
+    cp.async.wait_group 0;
+    bar.sync        0;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q0, %q1, %q2, %q3}, [%r28];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q4, %q5, %q6, %q7}, [%r28+32];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q8, %q9, %q10, %q11}, [%r28+64];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%q12, %q13, %q14, %q15}, [%r28+96];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%e0, %e1, %e2, %e3}, [%r28+9216];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%e4, %e5, %e6, %e7}, [%r28+9248];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%e8, %e9, %e10, %e11}, [%r28+9280];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%e12, %e13, %e14, %e15}, [%r28+9312];
+    bar.sync        0;                          // stage 1 is free now
+
+    mov.f32 %u0, 0f00000000;  mov.f32 %u1, 0f00000000;  mov.f32 %u2, 0f00000000;  mov.f32 %u3, 0f00000000;
+    mov.f32 %u4, 0f00000000;  mov.f32 %u5, 0f00000000;  mov.f32 %u6, 0f00000000;  mov.f32 %u7, 0f00000000;
+    mov.f32 %u8, 0f00000000;  mov.f32 %u9, 0f00000000;  mov.f32 %u10, 0f00000000; mov.f32 %u11, 0f00000000;
+    mov.f32 %u12, 0f00000000; mov.f32 %u13, 0f00000000; mov.f32 %u14, 0f00000000; mov.f32 %u15, 0f00000000;
+    mov.f32 %u16, 0f00000000; mov.f32 %u17, 0f00000000; mov.f32 %u18, 0f00000000; mov.f32 %u19, 0f00000000;
+    mov.f32 %u20, 0f00000000; mov.f32 %u21, 0f00000000; mov.f32 %u22, 0f00000000; mov.f32 %u23, 0f00000000;
+    mov.f32 %u24, 0f00000000; mov.f32 %u25, 0f00000000; mov.f32 %u26, 0f00000000; mov.f32 %u27, 0f00000000;
+    mov.f32 %u28, 0f00000000; mov.f32 %u29, 0f00000000; mov.f32 %u30, 0f00000000; mov.f32 %u31, 0f00000000;
+
+    mov.u32         %r44, 0;                    // key block
+kloop:
+    setp.ge.u32     %p, %r44, %r9;
+    @%p bra         last;
+    add.u32         %r45, %r44, 1;
+    and.b32         %r45, %r45, 1;
+    mad.lo.u32      %r45, %r45, 18432, %r21;
+    cp.async.cg.shared.global [%r45], [%rd6], 16;
+    add.u64         %rd8, %rd6, %rd2;
+    cp.async.cg.shared.global [%r45+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r45+9216], [%rd7], 16;
+    add.u64         %rd8, %rd7, %rd2;
+    cp.async.cg.shared.global [%r45+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r45+16128], [%rd8], 16;
+    cp.async.commit_group;
+    add.u64         %rd6, %rd6, %rd3;
+    add.u64         %rd7, %rd7, %rd3;
+    cp.async.wait_group 1;
+    bra             ready;
+last:
+    cp.async.wait_group 0;
+ready:
+    bar.sync        0;
+    and.b32         %r46, %r44, 1;
+    mul.lo.u32      %r46, %r46, 18432;
+    add.u32         %r47, %r34, %r46;           // K here, V at +9216, for this chunk
+    add.u32         %r48, %r37, %r46;           // K transposed
+    setp.eq.u32     %pd, %r44, %r9;             // the diagonal block needs the mask
+    mov.s32         %r52, %r42;                 // d0 - 16c
+    mov.s32         %r53, %r43;
+    mov.u32         %r49, 0;                    // chunk of 16 keys
+chunk:
+    // S = Q K^T
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q0, %q1, %q2, %q3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q0, %q1, %q2, %q3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q4, %q5, %q6, %q7}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q4, %q5, %q6, %q7}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q8, %q9, %q10, %q11}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q8, %q9, %q10, %q11}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%q12, %q13, %q14, %q15}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%q12, %q13, %q14, %q15}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    // dP = dO V^T
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9216];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%e0, %e1, %e2, %e3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%e0, %e1, %e2, %e3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9248];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%e4, %e5, %e6, %e7}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%e4, %e5, %e6, %e7}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9280];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%e8, %e9, %e10, %e11}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%e8, %e9, %e10, %e11}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9312];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%e12, %e13, %e14, %e15}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%e12, %e13, %e14, %e15}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    // P = 2^(S c - lse)
+    mul.f32 %s0, %s0, %f2;    mul.f32 %s1, %s1, %f2;    mul.f32 %s2, %s2, %f2;    mul.f32 %s3, %s3, %f2;
+    mul.f32 %s4, %s4, %f2;    mul.f32 %s5, %s5, %f2;    mul.f32 %s6, %s6, %f2;    mul.f32 %s7, %s7, %f2;
+    @!%pd bra       nomask;
+    setp.lt.s32 %p, %r52, 0;   @%p mov.f32 %s0, 0fFF800000;   setp.lt.s32 %p, %r52, 1;   @%p mov.f32 %s1, 0fFF800000;
+    setp.lt.s32 %p, %r53, 0;   @%p mov.f32 %s2, 0fFF800000;   setp.lt.s32 %p, %r53, 1;   @%p mov.f32 %s3, 0fFF800000;
+    setp.lt.s32 %p, %r52, 8;   @%p mov.f32 %s4, 0fFF800000;   setp.lt.s32 %p, %r52, 9;   @%p mov.f32 %s5, 0fFF800000;
+    setp.lt.s32 %p, %r53, 8;   @%p mov.f32 %s6, 0fFF800000;   setp.lt.s32 %p, %r53, 9;   @%p mov.f32 %s7, 0fFF800000;
+nomask:
+    sub.f32 %s0, %s0, %f3;    sub.f32 %s1, %s1, %f3;    sub.f32 %s2, %s2, %f4;    sub.f32 %s3, %s3, %f4;
+    sub.f32 %s4, %s4, %f3;    sub.f32 %s5, %s5, %f3;    sub.f32 %s6, %s6, %f4;    sub.f32 %s7, %s7, %f4;
+    ex2.approx.f32 %s0, %s0;  ex2.approx.f32 %s1, %s1;  ex2.approx.f32 %s2, %s2;  ex2.approx.f32 %s3, %s3;
+    ex2.approx.f32 %s4, %s4;  ex2.approx.f32 %s5, %s5;  ex2.approx.f32 %s6, %s6;  ex2.approx.f32 %s7, %s7;
+    // dS = P (dP - D)
+    sub.f32 %t0, %t0, %f5;    sub.f32 %t1, %t1, %f5;    sub.f32 %t2, %t2, %f6;    sub.f32 %t3, %t3, %f6;
+    sub.f32 %t4, %t4, %f5;    sub.f32 %t5, %t5, %f5;    sub.f32 %t6, %t6, %f6;    sub.f32 %t7, %t7, %f6;
+    mul.f32 %t0, %t0, %s0;    mul.f32 %t1, %t1, %s1;    mul.f32 %t2, %t2, %s2;    mul.f32 %t3, %t3, %s3;
+    mul.f32 %t4, %t4, %s4;    mul.f32 %t5, %t5, %s5;    mul.f32 %t6, %t6, %s6;    mul.f32 %t7, %t7, %s7;
+    // dQ += dS K
+    cvt.rn.bf16x2.f32 %a0, %t1, %t0;
+    cvt.rn.bf16x2.f32 %a1, %t3, %t2;
+    cvt.rn.bf16x2.f32 %a2, %t5, %t4;
+    cvt.rn.bf16x2.f32 %a3, %t7, %t6;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u0, %u1, %u2, %u3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u0, %u1, %u2, %u3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u4, %u5, %u6, %u7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u4, %u5, %u6, %u7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u8, %u9, %u10, %u11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u8, %u9, %u10, %u11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u12, %u13, %u14, %u15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u12, %u13, %u14, %u15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u16, %u17, %u18, %u19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u16, %u17, %u18, %u19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u20, %u21, %u22, %u23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u20, %u21, %u22, %u23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u24, %u25, %u26, %u27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u24, %u25, %u26, %u27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u28, %u29, %u30, %u31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u28, %u29, %u30, %u31};
+    add.u32         %r47, %r47, 2304;           // next 16 keys
+    add.u32         %r48, %r48, 2304;
+    sub.s32         %r52, %r52, 16;
+    sub.s32         %r53, %r53, 16;
+    add.u32         %r49, %r49, 1;
+    setp.lt.u32     %p, %r49, 4;
+    @%p bra         chunk;
+
+    bar.sync        0;
+    add.u32         %r44, %r44, 1;
+    setp.le.u32     %p, %r44, %r9;
+    @%p bra         kloop;
+
+    // dq * scale into the q part of dqkv: rows q0 + w*16 + g (+8), cols h*64 + 8nt + 2t
+    add.u32         %r54, %r23, %r39;
+    add.u32         %r54, %r54, %r17;           // m for row g
+    shl.b32         %r55, %r11, 6;
+    add.u32         %r55, %r55, %r41;
+    mad.lo.u32      %r56, %r54, %r16, %r55;
+    ld.param.u64    %rd12, [pdq];
+    mul.wide.u32    %rd13, %r56, 2;
+    add.u64         %rd12, %rd12, %rd13;        // row g
+    shl.b64         %rd13, %rd1, 3;
+    add.u64         %rd13, %rd12, %rd13;        // row g+8
+    mul.f32 %u0, %u0, %f1;    mul.f32 %u1, %u1, %f1;    mul.f32 %u2, %u2, %f1;    mul.f32 %u3, %u3, %f1;
+    mul.f32 %u4, %u4, %f1;    mul.f32 %u5, %u5, %f1;    mul.f32 %u6, %u6, %f1;    mul.f32 %u7, %u7, %f1;
+    mul.f32 %u8, %u8, %f1;    mul.f32 %u9, %u9, %f1;    mul.f32 %u10, %u10, %f1;  mul.f32 %u11, %u11, %f1;
+    mul.f32 %u12, %u12, %f1;  mul.f32 %u13, %u13, %f1;  mul.f32 %u14, %u14, %f1;  mul.f32 %u15, %u15, %f1;
+    mul.f32 %u16, %u16, %f1;  mul.f32 %u17, %u17, %f1;  mul.f32 %u18, %u18, %f1;  mul.f32 %u19, %u19, %f1;
+    mul.f32 %u20, %u20, %f1;  mul.f32 %u21, %u21, %f1;  mul.f32 %u22, %u22, %f1;  mul.f32 %u23, %u23, %f1;
+    mul.f32 %u24, %u24, %f1;  mul.f32 %u25, %u25, %f1;  mul.f32 %u26, %u26, %f1;  mul.f32 %u27, %u27, %f1;
+    mul.f32 %u28, %u28, %f1;  mul.f32 %u29, %u29, %f1;  mul.f32 %u30, %u30, %f1;  mul.f32 %u31, %u31, %f1;
+    cvt.rn.bf16x2.f32 %r57, %u1, %u0;
+    st.global.b32   [%rd12], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u3, %u2;
+    st.global.b32   [%rd13], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u5, %u4;
+    st.global.b32   [%rd12+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u7, %u6;
+    st.global.b32   [%rd13+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u9, %u8;
+    st.global.b32   [%rd12+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u11, %u10;
+    st.global.b32   [%rd13+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u13, %u12;
+    st.global.b32   [%rd12+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u15, %u14;
+    st.global.b32   [%rd13+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u17, %u16;
+    st.global.b32   [%rd12+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u19, %u18;
+    st.global.b32   [%rd13+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u21, %u20;
+    st.global.b32   [%rd12+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u23, %u22;
+    st.global.b32   [%rd13+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u25, %u24;
+    st.global.b32   [%rd12+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u27, %u26;
+    st.global.b32   [%rd13+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u29, %u28;
+    st.global.b32   [%rd12+112], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u31, %u30;
+    st.global.b32   [%rd13+112], %r57;
+    ret;
+}
+
+// dK and dV for 64 keys of one kv head. every query head in its group, and every
+// query block from the diagonal on, comes past; K and V fragments stay in
+// registers, Q, dO, lse and D stream through two stages. per 16 queries:
+//   S^T = K Q^T, P^T = 2^(S^T c - lse), dV += P^T dO
+//   dP^T = V dO^T, dS^T = P^T (dP^T - D), dK += dS^T Q
+// dk (times 1/sqrt(hd)) and dv go into the k and v parts of dqkv.
+// grid (T/64, KVH, B), block 128. block 0 has the most work and goes first anyway
+.visible .entry flash_dkv(
+    .param .u64 pqkv,
+    .param .u64 pdy,
+    .param .u64 plse,
+    .param .u64 pd,
+    .param .u64 pdq,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .f32 pscale)
+{
+    .shared .align 16 .b8 sm[37888];            // 2 stages of Q 9216, dO 9216, lse 256, D 256
+    .reg .pred  %p, %pd, %pc;
+    .reg .b32   %r<80>;
+    .reg .b64   %rd<32>;
+    .reg .f32   %f<24>;
+    .reg .f32   %s<8>;                          // S^T / P^T, 16 keys x 16 queries
+    .reg .f32   %t<8>;                          // dP^T / dS^T
+    .reg .f32   %u<32>;                         // dK
+    .reg .f32   %v<32>;                         // dV
+    .reg .b32   %kf<16>;                        // K fragments (A)
+    .reg .b32   %vf<16>;                        // V fragments (A)
+    .reg .b32   %k<4>;
+    .reg .b32   %a<4>;
+
+    ld.param.u32    %r1, [pt];
+    ld.param.u32    %r2, [ph];
+    ld.param.u32    %r3, [pkvh];
+    ld.param.f32    %f1, [pscale];
+    mul.f32         %f2, %f1, 0f3FB8AA3B;       // scale * log2(e)
+    mov.f32         %f0, 0f00000000;
+    mov.u32         %r4, %tid.x;
+    shr.u32         %r5, %r4, 5;
+    and.b32         %r6, %r4, 31;
+    shr.u32         %r7, %r6, 2;                // g
+    and.b32         %r8, %r6, 3;                // t
+    mov.u32         %r9, %ctaid.x;              // key block
+    mov.u32         %r11, %ctaid.y;             // kv head
+    mov.u32         %r12, %ctaid.z;             // b
+    div.u32         %r13, %r2, %r3;             // group size
+    shl.b32         %r14, %r2, 6;               // QD
+    shl.b32         %r15, %r3, 6;               // KVD
+    shl.b32         %r16, %r15, 1;
+    add.u32         %r16, %r16, %r14;           // QKV
+    mul.wide.u32    %rd1, %r16, 2;
+    shl.b64         %rd2, %rd1, 4;              // 16 qkv rows
+    mul.wide.u32    %rd14, %r14, 32;            // 16 dy rows
+    mul.lo.u32      %r17, %r12, %r1;            // b*T
+    shr.u32         %r10, %r1, 6;               // query blocks
+    sub.u32         %r60, %r10, %r9;            // from the diagonal on
+    mul.lo.u32      %r61, %r60, %r13;           // items: (head in group, query block)
+
+    shr.u32         %r18, %r4, 3;
+    and.b32         %r19, %r4, 7;
+    shl.b32         %r19, %r19, 3;
+    mov.u32         %r20, sm;
+    mad.lo.u32      %r21, %r18, 144, %r20;
+    shl.b32         %r22, %r19, 1;
+    add.u32         %r21, %r21, %r22;           // copy dst in stage 0
+    // K and V of this block, parked in stage 1 until they're in registers
+    shl.b32         %r23, %r9, 6;               // k0
+    add.u32         %r24, %r17, %r23;
+    add.u32         %r24, %r24, %r18;
+    ld.param.u64    %rd4, [pqkv];
+    mul.lo.u32      %r25, %r24, %r16;
+    add.u32         %r25, %r25, %r14;
+    shl.b32         %r26, %r11, 6;
+    add.u32         %r25, %r25, %r26;
+    add.u32         %r25, %r25, %r19;
+    mul.wide.u32    %rd6, %r25, 2;
+    add.u64         %rd6, %rd4, %rd6;
+    mul.wide.u32    %rd7, %r15, 2;
+    add.u64         %rd7, %rd6, %rd7;
+    add.u32         %r27, %r21, 18944;
+    cp.async.cg.shared.global [%r27], [%rd6], 16;
+    add.u64         %rd8, %rd6, %rd2;
+    cp.async.cg.shared.global [%r27+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r27+9216], [%rd7], 16;
+    add.u64         %rd8, %rd7, %rd2;
+    cp.async.cg.shared.global [%r27+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r27+16128], [%rd8], 16;
+
+    // ldmatrix bases. A (K, V in stage 1): row w*16 + lane%16, col (lane/16)*8
+    and.b32         %r28, %r6, 15;
+    mad.lo.u32      %r28, %r5, 16, %r28;
+    mad.lo.u32      %r28, %r28, 144, %r20;
+    shr.u32         %r29, %r6, 4;
+    shl.b32         %r30, %r29, 4;
+    add.u32         %r28, %r28, %r30;
+    add.u32         %r28, %r28, 18944;
+    // B from [query][hd] (Q for S^T, dO for dP^T): query lane%8 + (lane/16)*8, hd ((lane/8)%2)*8
+    and.b32         %r31, %r6, 7;
+    shl.b32         %r32, %r29, 3;
+    add.u32         %r32, %r32, %r31;
+    shr.u32         %r33, %r6, 3;
+    and.b32         %r33, %r33, 1;
+    mad.lo.u32      %r34, %r32, 144, %r20;
+    shl.b32         %r35, %r33, 4;
+    add.u32         %r34, %r34, %r35;           // aB
+    // B transposed (dO for dV, Q for dK): query lane%8 + ((lane/8)%2)*8, hd (lane/16)*8
+    shl.b32         %r36, %r33, 3;
+    add.u32         %r36, %r36, %r31;
+    mad.lo.u32      %r37, %r36, 144, %r20;
+    shl.b32         %r38, %r29, 4;
+    add.u32         %r37, %r37, %r38;           // aBt
+    // mask: query 16c + 8nt + 2t (+1) before key row w*16 + g (+8)
+    mad.lo.u32      %r39, %r5, 16, %r7;
+    shl.b32         %r41, %r8, 1;
+    sub.s32         %r42, %r39, %r41;           // e0
+    add.s32         %r43, %r42, 8;              // e1
+    // the lse/D copy: threads 0-15 take lse, 16-31 take D, 16 bytes each
+    setp.lt.u32     %pc, %r4, 32;
+    and.b32         %r64, %r4, 15;
+    shl.b32         %r64, %r64, 4;
+    setp.ge.u32     %p, %r4, 16;
+    selp.u32        %r65, 18688, 18432, %p;
+    add.u32         %r65, %r65, %r64;
+    add.u32         %r65, %r65, %r20;           // shared dst in stage 0
+    ld.param.u64    %rd20, [plse];
+    ld.param.u64    %rd21, [pd];
+    @%p mov.u64     %rd20, %rd21;
+    ld.param.u64    %rd22, [pdy];
+
+    mov.u32         %r62, 0;                    // item to fetch
+issue:
+    // item j: query head kvh*G + j/nq, query block k0/64 + j%nq
+    div.u32         %r66, %r62, %r60;
+    rem.u32         %r67, %r62, %r60;
+    add.u32         %r67, %r67, %r9;            // query block
+    mad.lo.u32      %r66, %r11, %r13, %r66;     // h
+    and.b32         %r68, %r62, 1;
+    mul.lo.u32      %r68, %r68, 18944;          // stage
+    shl.b32         %r69, %r67, 6;
+    add.u32         %r70, %r17, %r69;
+    add.u32         %r70, %r70, %r18;           // this thread's query row
+    shl.b32         %r71, %r66, 6;
+    add.u32         %r71, %r71, %r19;
+    mad.lo.u32      %r72, %r70, %r16, %r71;
+    mul.wide.u32    %rd9, %r72, 2;
+    add.u64         %rd9, %rd4, %rd9;           // Q
+    mad.lo.u32      %r72, %r70, %r14, %r71;
+    mul.wide.u32    %rd10, %r72, 2;
+    add.u64         %rd10, %rd22, %rd10;        // dO
+    add.u32         %r73, %r21, %r68;
+    cp.async.cg.shared.global [%r73], [%rd9], 16;
+    add.u64         %rd8, %rd9, %rd2;
+    cp.async.cg.shared.global [%r73+2304], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r73+4608], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd2;
+    cp.async.cg.shared.global [%r73+6912], [%rd8], 16;
+    cp.async.cg.shared.global [%r73+9216], [%rd10], 16;
+    add.u64         %rd8, %rd10, %rd14;
+    cp.async.cg.shared.global [%r73+11520], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd14;
+    cp.async.cg.shared.global [%r73+13824], [%rd8], 16;
+    add.u64         %rd8, %rd8, %rd14;
+    cp.async.cg.shared.global [%r73+16128], [%rd8], 16;
+    @!%pc bra       issued;
+    mad.lo.u32      %r74, %r12, %r2, %r66;
+    mad.lo.u32      %r74, %r74, %r1, %r69;      // (b*H + h)*T + q0
+    mul.wide.u32    %rd11, %r74, 4;
+    add.u64         %rd11, %rd20, %rd11;
+    cvt.u64.u32     %rd12, %r64;
+    add.u64         %rd11, %rd11, %rd12;
+    add.u32         %r75, %r65, %r68;
+    cp.async.cg.shared.global [%r75], [%rd11], 16;
+issued:
+    cp.async.commit_group;
+    setp.ne.u32     %p, %r62, 0;
+    @%p bra         fetched;
+
+    // first time through: K, V and item 0 are in. K and V go to registers for good
+    cp.async.wait_group 0;
+    bar.sync        0;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%kf0, %kf1, %kf2, %kf3}, [%r28];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%kf4, %kf5, %kf6, %kf7}, [%r28+32];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%kf8, %kf9, %kf10, %kf11}, [%r28+64];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%kf12, %kf13, %kf14, %kf15}, [%r28+96];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%vf0, %vf1, %vf2, %vf3}, [%r28+9216];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%vf4, %vf5, %vf6, %vf7}, [%r28+9248];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%vf8, %vf9, %vf10, %vf11}, [%r28+9280];
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%vf12, %vf13, %vf14, %vf15}, [%r28+9312];
+    bar.sync        0;                          // stage 1 is free now
+    mov.f32 %u0, 0f00000000;  mov.f32 %u1, 0f00000000;  mov.f32 %u2, 0f00000000;  mov.f32 %u3, 0f00000000;
+    mov.f32 %u4, 0f00000000;  mov.f32 %u5, 0f00000000;  mov.f32 %u6, 0f00000000;  mov.f32 %u7, 0f00000000;
+    mov.f32 %u8, 0f00000000;  mov.f32 %u9, 0f00000000;  mov.f32 %u10, 0f00000000; mov.f32 %u11, 0f00000000;
+    mov.f32 %u12, 0f00000000; mov.f32 %u13, 0f00000000; mov.f32 %u14, 0f00000000; mov.f32 %u15, 0f00000000;
+    mov.f32 %u16, 0f00000000; mov.f32 %u17, 0f00000000; mov.f32 %u18, 0f00000000; mov.f32 %u19, 0f00000000;
+    mov.f32 %u20, 0f00000000; mov.f32 %u21, 0f00000000; mov.f32 %u22, 0f00000000; mov.f32 %u23, 0f00000000;
+    mov.f32 %u24, 0f00000000; mov.f32 %u25, 0f00000000; mov.f32 %u26, 0f00000000; mov.f32 %u27, 0f00000000;
+    mov.f32 %u28, 0f00000000; mov.f32 %u29, 0f00000000; mov.f32 %u30, 0f00000000; mov.f32 %u31, 0f00000000;
+    mov.f32 %v0, 0f00000000;  mov.f32 %v1, 0f00000000;  mov.f32 %v2, 0f00000000;  mov.f32 %v3, 0f00000000;
+    mov.f32 %v4, 0f00000000;  mov.f32 %v5, 0f00000000;  mov.f32 %v6, 0f00000000;  mov.f32 %v7, 0f00000000;
+    mov.f32 %v8, 0f00000000;  mov.f32 %v9, 0f00000000;  mov.f32 %v10, 0f00000000; mov.f32 %v11, 0f00000000;
+    mov.f32 %v12, 0f00000000; mov.f32 %v13, 0f00000000; mov.f32 %v14, 0f00000000; mov.f32 %v15, 0f00000000;
+    mov.f32 %v16, 0f00000000; mov.f32 %v17, 0f00000000; mov.f32 %v18, 0f00000000; mov.f32 %v19, 0f00000000;
+    mov.f32 %v20, 0f00000000; mov.f32 %v21, 0f00000000; mov.f32 %v22, 0f00000000; mov.f32 %v23, 0f00000000;
+    mov.f32 %v24, 0f00000000; mov.f32 %v25, 0f00000000; mov.f32 %v26, 0f00000000; mov.f32 %v27, 0f00000000;
+    mov.f32 %v28, 0f00000000; mov.f32 %v29, 0f00000000; mov.f32 %v30, 0f00000000; mov.f32 %v31, 0f00000000;
+    mov.u32         %r63, 0;                    // item being worked on
+    bra             top;
+fetched:
+    cp.async.wait_group 1;
+    bra             ready;
+top:
+    add.u32         %r62, %r63, 1;
+    setp.lt.u32     %p, %r62, %r61;
+    @%p bra         issue;
+    cp.async.wait_group 0;
+ready:
+    bar.sync        0;
+    and.b32         %r68, %r63, 1;
+    mul.lo.u32      %r68, %r68, 18944;
+    add.u32         %r47, %r34, %r68;           // Q here, dO at +9216, for this chunk
+    add.u32         %r48, %r37, %r68;           // transposed
+    add.u32         %r76, %r20, %r68;
+    add.u32         %r76, %r76, 18432;
+    shl.b32         %r77, %r41, 2;
+    add.u32         %r76, %r76, %r77;           // lse[16c + 2t], D 256 further
+    rem.u32         %r50, %r63, %r60;
+    setp.eq.u32     %pd, %r50, 0;               // the diagonal query block
+    mov.s32         %r52, %r42;                 // e0 - 16c
+    mov.s32         %r53, %r43;
+    mov.u32         %r49, 0;
+chunk:
+    // S^T = K Q^T
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%kf0, %kf1, %kf2, %kf3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%kf0, %kf1, %kf2, %kf3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%kf4, %kf5, %kf6, %kf7}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%kf4, %kf5, %kf6, %kf7}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%kf8, %kf9, %kf10, %kf11}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%kf8, %kf9, %kf10, %kf11}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s0, %s1, %s2, %s3}, {%kf12, %kf13, %kf14, %kf15}, {%k0, %k1}, {%s0, %s1, %s2, %s3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%s4, %s5, %s6, %s7}, {%kf12, %kf13, %kf14, %kf15}, {%k2, %k3}, {%s4, %s5, %s6, %s7};
+    // dP^T = V dO^T
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9216];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%vf0, %vf1, %vf2, %vf3}, {%k0, %k1}, {%f0, %f0, %f0, %f0};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%vf0, %vf1, %vf2, %vf3}, {%k2, %k3}, {%f0, %f0, %f0, %f0};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9248];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%vf4, %vf5, %vf6, %vf7}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%vf4, %vf5, %vf6, %vf7}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9280];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%vf8, %vf9, %vf10, %vf11}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%vf8, %vf9, %vf10, %vf11}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%k0, %k1, %k2, %k3}, [%r47+9312];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t0, %t1, %t2, %t3}, {%vf12, %vf13, %vf14, %vf15}, {%k0, %k1}, {%t0, %t1, %t2, %t3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%t4, %t5, %t6, %t7}, {%vf12, %vf13, %vf14, %vf15}, {%k2, %k3}, {%t4, %t5, %t6, %t7};
+    // the thread's 4 query columns 16c + 2t, +1, +8, +9: their lse (log2 units) and D
+    ld.shared.v2.f32 {%f3, %f4}, [%r76];
+    ld.shared.v2.f32 {%f5, %f6}, [%r76+32];
+    ld.shared.v2.f32 {%f7, %f8}, [%r76+256];
+    ld.shared.v2.f32 {%f9, %f10}, [%r76+288];
+    mul.f32         %f3, %f3, 0f3FB8AA3B;
+    mul.f32         %f4, %f4, 0f3FB8AA3B;
+    mul.f32         %f5, %f5, 0f3FB8AA3B;
+    mul.f32         %f6, %f6, 0f3FB8AA3B;
+    // P^T = 2^(S^T c - lse)
+    mul.f32 %s0, %s0, %f2;    mul.f32 %s1, %s1, %f2;    mul.f32 %s2, %s2, %f2;    mul.f32 %s3, %s3, %f2;
+    mul.f32 %s4, %s4, %f2;    mul.f32 %s5, %s5, %f2;    mul.f32 %s6, %s6, %f2;    mul.f32 %s7, %s7, %f2;
+    @!%pd bra       nomask;
+    setp.gt.s32 %p, %r52, 0;   @%p mov.f32 %s0, 0fFF800000;   setp.gt.s32 %p, %r52, 1;   @%p mov.f32 %s1, 0fFF800000;
+    setp.gt.s32 %p, %r53, 0;   @%p mov.f32 %s2, 0fFF800000;   setp.gt.s32 %p, %r53, 1;   @%p mov.f32 %s3, 0fFF800000;
+    setp.gt.s32 %p, %r52, 8;   @%p mov.f32 %s4, 0fFF800000;   setp.gt.s32 %p, %r52, 9;   @%p mov.f32 %s5, 0fFF800000;
+    setp.gt.s32 %p, %r53, 8;   @%p mov.f32 %s6, 0fFF800000;   setp.gt.s32 %p, %r53, 9;   @%p mov.f32 %s7, 0fFF800000;
+nomask:
+    sub.f32 %s0, %s0, %f3;    sub.f32 %s1, %s1, %f4;    sub.f32 %s2, %s2, %f3;    sub.f32 %s3, %s3, %f4;
+    sub.f32 %s4, %s4, %f5;    sub.f32 %s5, %s5, %f6;    sub.f32 %s6, %s6, %f5;    sub.f32 %s7, %s7, %f6;
+    ex2.approx.f32 %s0, %s0;  ex2.approx.f32 %s1, %s1;  ex2.approx.f32 %s2, %s2;  ex2.approx.f32 %s3, %s3;
+    ex2.approx.f32 %s4, %s4;  ex2.approx.f32 %s5, %s5;  ex2.approx.f32 %s6, %s6;  ex2.approx.f32 %s7, %s7;
+    // dV += P^T dO
+    cvt.rn.bf16x2.f32 %a0, %s1, %s0;
+    cvt.rn.bf16x2.f32 %a1, %s3, %s2;
+    cvt.rn.bf16x2.f32 %a2, %s5, %s4;
+    cvt.rn.bf16x2.f32 %a3, %s7, %s6;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+9216];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v0, %v1, %v2, %v3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%v0, %v1, %v2, %v3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v4, %v5, %v6, %v7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%v4, %v5, %v6, %v7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+9248];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v8, %v9, %v10, %v11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%v8, %v9, %v10, %v11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v12, %v13, %v14, %v15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%v12, %v13, %v14, %v15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+9280];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v16, %v17, %v18, %v19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%v16, %v17, %v18, %v19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v20, %v21, %v22, %v23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%v20, %v21, %v22, %v23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+9312];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v24, %v25, %v26, %v27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%v24, %v25, %v26, %v27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%v28, %v29, %v30, %v31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%v28, %v29, %v30, %v31};
+    // dS^T = P^T (dP^T - D)
+    sub.f32 %t0, %t0, %f7;    sub.f32 %t1, %t1, %f8;    sub.f32 %t2, %t2, %f7;    sub.f32 %t3, %t3, %f8;
+    sub.f32 %t4, %t4, %f9;    sub.f32 %t5, %t5, %f10;   sub.f32 %t6, %t6, %f9;    sub.f32 %t7, %t7, %f10;
+    mul.f32 %t0, %t0, %s0;    mul.f32 %t1, %t1, %s1;    mul.f32 %t2, %t2, %s2;    mul.f32 %t3, %t3, %s3;
+    mul.f32 %t4, %t4, %s4;    mul.f32 %t5, %t5, %s5;    mul.f32 %t6, %t6, %s6;    mul.f32 %t7, %t7, %s7;
+    // dK += dS^T Q
+    cvt.rn.bf16x2.f32 %a0, %t1, %t0;
+    cvt.rn.bf16x2.f32 %a1, %t3, %t2;
+    cvt.rn.bf16x2.f32 %a2, %t5, %t4;
+    cvt.rn.bf16x2.f32 %a3, %t7, %t6;
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u0, %u1, %u2, %u3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u0, %u1, %u2, %u3};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u4, %u5, %u6, %u7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u4, %u5, %u6, %u7};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+32];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u8, %u9, %u10, %u11}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u8, %u9, %u10, %u11};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u12, %u13, %u14, %u15}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u12, %u13, %u14, %u15};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+64];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u16, %u17, %u18, %u19}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u16, %u17, %u18, %u19};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u20, %u21, %u22, %u23}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u20, %u21, %u22, %u23};
+    ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48+96];
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u24, %u25, %u26, %u27}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%u24, %u25, %u26, %u27};
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%u28, %u29, %u30, %u31}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%u28, %u29, %u30, %u31};
+    add.u32         %r47, %r47, 2304;           // next 16 queries
+    add.u32         %r48, %r48, 2304;
+    add.u32         %r76, %r76, 64;
+    sub.s32         %r52, %r52, 16;
+    sub.s32         %r53, %r53, 16;
+    add.u32         %r49, %r49, 1;
+    setp.lt.u32     %p, %r49, 4;
+    @%p bra         chunk;
+
+    bar.sync        0;
+    add.u32         %r63, %r63, 1;
+    setp.lt.u32     %p, %r63, %r61;
+    @%p bra         top;
+
+    // dk * scale and dv into dqkv: rows k0 + w*16 + g (+8), cols QD + kvh*64 + 8nt + 2t (dv: + KVD)
+    add.u32         %r54, %r23, %r39;
+    add.u32         %r54, %r54, %r17;
+    shl.b32         %r55, %r11, 6;
+    add.u32         %r55, %r55, %r14;
+    add.u32         %r55, %r55, %r41;
+    mad.lo.u32      %r56, %r54, %r16, %r55;
+    ld.param.u64    %rd12, [pdq];
+    mul.wide.u32    %rd13, %r56, 2;
+    add.u64         %rd12, %rd12, %rd13;        // dk, row g
+    shl.b64         %rd13, %rd1, 3;
+    add.u64         %rd13, %rd12, %rd13;        // row g+8
+    mul.wide.u32    %rd15, %r15, 2;
+    add.u64         %rd16, %rd12, %rd15;        // dv, row g
+    add.u64         %rd17, %rd13, %rd15;        // dv, row g+8
+    mul.f32 %u0, %u0, %f1;    mul.f32 %u1, %u1, %f1;    mul.f32 %u2, %u2, %f1;    mul.f32 %u3, %u3, %f1;
+    mul.f32 %u4, %u4, %f1;    mul.f32 %u5, %u5, %f1;    mul.f32 %u6, %u6, %f1;    mul.f32 %u7, %u7, %f1;
+    mul.f32 %u8, %u8, %f1;    mul.f32 %u9, %u9, %f1;    mul.f32 %u10, %u10, %f1;  mul.f32 %u11, %u11, %f1;
+    mul.f32 %u12, %u12, %f1;  mul.f32 %u13, %u13, %f1;  mul.f32 %u14, %u14, %f1;  mul.f32 %u15, %u15, %f1;
+    mul.f32 %u16, %u16, %f1;  mul.f32 %u17, %u17, %f1;  mul.f32 %u18, %u18, %f1;  mul.f32 %u19, %u19, %f1;
+    mul.f32 %u20, %u20, %f1;  mul.f32 %u21, %u21, %f1;  mul.f32 %u22, %u22, %f1;  mul.f32 %u23, %u23, %f1;
+    mul.f32 %u24, %u24, %f1;  mul.f32 %u25, %u25, %f1;  mul.f32 %u26, %u26, %f1;  mul.f32 %u27, %u27, %f1;
+    mul.f32 %u28, %u28, %f1;  mul.f32 %u29, %u29, %f1;  mul.f32 %u30, %u30, %f1;  mul.f32 %u31, %u31, %f1;
+    cvt.rn.bf16x2.f32 %r57, %u1, %u0;
+    st.global.b32   [%rd12], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u3, %u2;
+    st.global.b32   [%rd13], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u5, %u4;
+    st.global.b32   [%rd12+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u7, %u6;
+    st.global.b32   [%rd13+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u9, %u8;
+    st.global.b32   [%rd12+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u11, %u10;
+    st.global.b32   [%rd13+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u13, %u12;
+    st.global.b32   [%rd12+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u15, %u14;
+    st.global.b32   [%rd13+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u17, %u16;
+    st.global.b32   [%rd12+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u19, %u18;
+    st.global.b32   [%rd13+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u21, %u20;
+    st.global.b32   [%rd12+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u23, %u22;
+    st.global.b32   [%rd13+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u25, %u24;
+    st.global.b32   [%rd12+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u27, %u26;
+    st.global.b32   [%rd13+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u29, %u28;
+    st.global.b32   [%rd12+112], %r57;
+    cvt.rn.bf16x2.f32 %r57, %u31, %u30;
+    st.global.b32   [%rd13+112], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v1, %v0;
+    st.global.b32   [%rd16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v3, %v2;
+    st.global.b32   [%rd17], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v5, %v4;
+    st.global.b32   [%rd16+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v7, %v6;
+    st.global.b32   [%rd17+16], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v9, %v8;
+    st.global.b32   [%rd16+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v11, %v10;
+    st.global.b32   [%rd17+32], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v13, %v12;
+    st.global.b32   [%rd16+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v15, %v14;
+    st.global.b32   [%rd17+48], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v17, %v16;
+    st.global.b32   [%rd16+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v19, %v18;
+    st.global.b32   [%rd17+64], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v21, %v20;
+    st.global.b32   [%rd16+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v23, %v22;
+    st.global.b32   [%rd17+80], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v25, %v24;
+    st.global.b32   [%rd16+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v27, %v26;
+    st.global.b32   [%rd17+96], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v29, %v28;
+    st.global.b32   [%rd16+112], %r57;
+    cvt.rn.bf16x2.f32 %r57, %v31, %v30;
+    st.global.b32   [%rd17+112], %r57;
+    ret;
+}
