@@ -1,27 +1,68 @@
-; console output. all through WriteFile so it still works redirected to a file
+; console output. everything goes through WriteFile so it still works redirected to a file
 default rel
 bits 64
 %include "lib.inc"
 
-extern GetStdHandle
-extern WriteFile
-
-section .rdata
-hexdig  db "0123456789abcdef"
-minus   db "-"
+extern GetStdHandle, WriteFile, GetConsoleMode, SetConsoleMode
+extern GetConsoleOutputCP, SetConsoleOutputCP, GetLastError, ExitProcess
 
 section .bss
-stdout  resq 1
-written resd 1
+con_out  resq 1
+con_tty  resd 1                 ; 1 if stdout is a real console, not a file or pipe
+oldmode  resd 1
+oldcp    resd 1
+written  resd 1
 
 section .text
+
+; what most programs want at startup
+global lib_init
+lib_init:
+    sub rsp, 40
+    call con_init
+    call time_init
+    call cpu_detect
+    call args_init
+    add rsp, 40
+    ret
 
 global con_init
 con_init:
     sub rsp, 40
     mov ecx, -11                ; STD_OUTPUT_HANDLE
     call GetStdHandle
-    mov [stdout], rax
+    mov [con_out], rax
+    mov rcx, rax
+    lea rdx, [oldmode]
+    call GetConsoleMode
+    test eax, eax
+    jz .done                    ; redirected, leave it alone
+    mov dword [con_tty], 1
+    mov rcx, [con_out]
+    mov edx, [oldmode]
+    or edx, 5                   ; PROCESSED_OUTPUT | VIRTUAL_TERMINAL_PROCESSING
+    call SetConsoleMode
+    call GetConsoleOutputCP
+    mov [oldcp], eax
+    mov ecx, 65001              ; utf-8, for the bar characters
+    call SetConsoleOutputCP
+.done:
+    add rsp, 40
+    ret
+
+; put the console back how we found it, the shell shares it with us
+global con_restore
+con_restore:
+    sub rsp, 40
+    cmp dword [con_tty], 0
+    je .done
+    say 27, "[0m", 27, "[?25h"  ; plain colors, cursor back on
+    mov rcx, [con_out]
+    mov edx, [oldmode]
+    call SetConsoleMode
+    mov ecx, [oldcp]
+    call SetConsoleOutputCP
+.done:
     add rsp, 40
     ret
 
@@ -31,7 +72,7 @@ print:
     sub rsp, 40
     mov r8, rdx
     mov rdx, rcx
-    mov rcx, [stdout]
+    mov rcx, [con_out]
     lea r9, [written]
     mov qword [rsp+32], 0
     call WriteFile
@@ -49,73 +90,46 @@ print_z:
     jmp .len
 .go:
     sub rdx, rcx
-    jmp print                   ; tail call, stack is untouched so print returns straight to our caller
+    jmp print                   ; tail call, print returns straight to our caller
 
-; rcx = unsigned 64-bit value
-global print_dec
-print_dec:
-    sub rsp, 72                 ; 40 for calls + 32 byte digit buffer at rsp+40
-    lea r8, [rsp+72]            ; one past the end, digits get written backwards
-    mov r9, r8
-    mov rax, rcx
-    mov r10, 0xcccccccccccccccd ; ceil(2^67 / 10): x/10 = (x * this) >> 67
-.loop:
-    mov rcx, rax
-    mul r10
-    shr rdx, 3                  ; rdx = x / 10
-    lea rax, [rdx+rdx*4]
-    add rax, rax
-    sub rcx, rax                ; x - q*10
-    add cl, '0'
-    dec r9
-    mov [r9], cl
-    mov rax, rdx
-    test rax, rax
-    jnz .loop
-
-    mov rcx, r9
-    mov rdx, r8
-    sub rdx, r9
+; print_x(a, b) = fmt_x(buf, a, b) then print. every arg slides over one slot
+%macro printer 2
+global %1
+%1:
+    sub rsp, 120                ; 40 for calls + 80 byte buffer
+    mov r8, rdx
+    mov rdx, rcx
+    movapd xmm1, xmm0
+    lea rcx, [rsp+40]
+    call %2
+    lea rcx, [rsp+40]
+    mov rdx, rax
+    sub rdx, rcx
     call print
-    add rsp, 72
+    add rsp, 120
     ret
+%endmacro
 
-; rcx = signed 64-bit value
-global print_int
-print_int:
-    test rcx, rcx
-    jns print_dec
+printer print_dec, fmt_dec      ; rcx = unsigned
+printer print_int, fmt_int      ; rcx = signed
+printer print_hex, fmt_hex      ; rcx = value, edx = digits
+printer print_fixed, fmt_fixed  ; xmm0 = value, edx = decimals
+printer print_sci, fmt_sci      ; xmm0 = value, edx = decimals
+
+; rcx = message. prints it with GetLastError and exits
+global fatal
+fatal:
     sub rsp, 40
-    mov [rsp+48], rcx           ; park it in the home slot our caller gave us
-    lea rcx, [minus]
-    mov edx, 1
-    call print
+    mov [rsp+48], rcx           ; our home slots
+    call GetLastError
+    mov [rsp+56], rax
+    say 13, 10, "error: "
     mov rcx, [rsp+48]
-    neg rcx                     ; INT64_MIN stays 0x8000.. which is right as unsigned
-    add rsp, 40
-    jmp print_dec
-
-; rcx = value, edx = number of hex digits (1-16)
-global print_hex
-print_hex:
-    sub rsp, 72
-    lea r8, [rsp+72]
-    mov r9, r8
-    mov eax, edx
-    lea r10, [hexdig]
-.loop:
-    mov edx, ecx
-    and edx, 15
-    mov dl, [r10+rdx]
-    dec r9
-    mov [r9], dl
-    shr rcx, 4
-    dec eax
-    jnz .loop
-
-    mov rcx, r9
-    mov rdx, r8
-    sub rdx, r9
-    call print
-    add rsp, 72
-    ret
+    call print_z
+    say " (last error "
+    mov rcx, [rsp+56]
+    call print_dec
+    say ")", 13, 10
+    call con_restore
+    mov ecx, 1
+    call ExitProcess
