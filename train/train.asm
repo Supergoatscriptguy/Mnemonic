@@ -49,6 +49,8 @@ k_prompt  db "prompt", 0
 k_slen    db "sample_len", 0
 k_temp    db "temp", 0
 k_topk    db "top_k", 0
+k_gen     db "gen", 0
+k_gcount  db "gen_count", 0
 d_data    db "datasets\fineweb\shard_*.tok", 0
 d_val     db "datasets\fineweb\shard_01822.tok", 0
 d_tok     db "datasets\tokenizer.bin", 0
@@ -199,6 +201,14 @@ start:
     call buffers
     call dirs
     call resume
+    lea rcx, [k_gen]
+    xor edx, edx
+    call cfg_str
+    test rax, rax
+    jz .train
+    mov [prompt], rax
+    call generate               ; gen="..." just samples from the checkpoint
+.train:
     call plan
     call trainloop
     ; loop only comes back when it's done
@@ -575,6 +585,41 @@ plan:
     pop rsi
     ret
 
+; gen mode: a few samples of the prompt from wherever the run got to, then exit.
+; bin\train dev gen="Once upon a time" gen_count=5 temp=0.7
+generate:
+    push rbx
+    sub rsp, 32
+    call model_summary
+    say "  samples at step "
+    mov rcx, [step]
+    call print_dec
+    say ", temperature "
+    movsd xmm0, [temp]
+    mov edx, 2
+    call print_fixed
+    say ", top "
+    mov rcx, [topk]
+    call print_dec
+    say 13, 10, 13, 10
+    lea rcx, [k_gcount]
+    mov edx, 3
+    call cfg_int
+    mov rbx, rax
+.g:
+    test rbx, rbx
+    jz .done
+    call sample
+    lea rcx, [msg]
+    mov rdx, rax
+    call show
+    dec rbx
+    jmp .g
+.done:
+    call con_restore
+    xor ecx, ecx
+    call ExitProcess
+
 ; rcx = count, like 131K
 pcount:
     sub rsp, 72
@@ -738,7 +783,7 @@ fill:
     push rsi
     push rdi
     push r12
-    sub rsp, 32
+    sub rsp, 40
     mov ebx, ecx
     lea rsi, [hstep]
     mov rsi, [rsi+rbx*8]
@@ -792,7 +837,7 @@ fill:
 .done:
     lea rax, [tgt]
     mov [rax+rbx*8], r12
-    add rsp, 32
+    add rsp, 40
     pop r12
     pop rdi
     pop rsi
@@ -1002,6 +1047,57 @@ report:
     pop rbx
     ret
 
+; rcx = text, rdx = end. a copy without the color codes (ESC [ ... letter) goes to
+; msg+4096, rax = its end
+plain:
+    lea rax, [msg+4096]
+.c:
+    cmp rcx, rdx
+    jae .done
+    mov r8b, [rcx]
+    inc rcx
+    cmp r8b, 27
+    jne .keep
+.esc:
+    cmp rcx, rdx
+    jae .done
+    mov r8b, [rcx]
+    inc rcx
+    or r8b, 0x20
+    cmp r8b, 'a'
+    jb .esc
+    cmp r8b, 'z'
+    ja .esc
+    jmp .c
+.keep:
+    mov [rax], r8b
+    inc rax
+    jmp .c
+.done:
+    ret
+
+; rcx = text, rdx = end. to the console as is, or plain when redirected
+show:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, rdx
+    cmp dword [con_tty], 0
+    jne .print
+    call plain
+    lea rbx, [msg+4096]
+    mov rsi, rax
+.print:
+    mov rcx, rbx
+    mov rdx, rsi
+    sub rdx, rbx
+    call print
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
 ; rcx = text, rdx = end. above the bar and into the log. the colors only go to a
 ; real console, the log and redirected output get the plain text
 note:
@@ -1011,32 +1107,8 @@ note:
     sub rsp, 32
     mov rbx, rcx
     mov rsi, rdx
-    ; plain copy at msg+4096: drop every ESC [ ... letter
-    lea rdi, [msg+4096]
-    mov rcx, rbx
-.c:
-    cmp rcx, rsi
-    jae .plain
-    mov al, [rcx]
-    inc rcx
-    cmp al, 27
-    jne .keep
-.esc:
-    cmp rcx, rsi
-    jae .plain
-    mov al, [rcx]
-    inc rcx
-    or al, 0x20
-    cmp al, 'a'
-    jb .esc
-    cmp al, 'z'
-    ja .esc
-    jmp .c
-.keep:
-    mov [rdi], al
-    inc rdi
-    jmp .c
-.plain:
+    call plain
+    mov rdi, rax
     cmp dword [con_tty], 0
     je .redir
     lea rcx, [stats]
@@ -1117,13 +1189,17 @@ validate:
     mov rdx, rdi
     call note
     call sample
+    lea rcx, [msg]
+    mov rdx, rax
+    call note
     add rsp, 48
     pop rdi
     pop rsi
     pop rbx
     ret
 
-; a short continuation of the prompt, top-k sampling at temperature temp
+; a short continuation of the prompt, top-k sampling at temperature temp. the text
+; goes to msg, rax = its end
 sample:
     push rbx
     push rsi
@@ -1220,9 +1296,7 @@ sample:
     jmp .clean
 .end:
     emit 13, 10
-    lea rcx, [msg]
-    mov rdx, rdi
-    call note
+    mov rax, rdi
     add rsp, 32
     pop r13
     pop r12

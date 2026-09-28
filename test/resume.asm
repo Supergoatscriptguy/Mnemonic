@@ -1,18 +1,25 @@
 ; stage 5 test: stop a training run half way, carry on from its checkpoint, and end
 ; up with exactly the same weights and adam state as a run that never stopped.
-; runs bin\train.exe (the tiny preset) three times
+; runs bin\train.exe (the tiny preset) three times, on three little .tok files cut
+; from the real ones, so the runs cross files (and the stop lands in the second one)
 default rel
 bits 64
 %include "lib.inc"
+%include "tokenizer/tok.inc"
 %include "train/train.inc"
 %include "test/check.inc"
 
 extern CreateProcessA, WaitForSingleObject, GetExitCodeProcess, TerminateProcess, CloseHandle
 
 section .rdata
-run_a    db "bin\train.exe tiny run=restest_a", 0
-run_b1   db "bin\train.exe tiny run=restest_b stop_at=17", 0
-run_b2   db "bin\train.exe tiny run=restest_b", 0
+run_a    db "bin\train.exe tiny run=restest_a data=scratch\restest\*.tok", 0
+run_b1   db "bin\train.exe tiny run=restest_b data=scratch\restest\*.tok stop_at=17", 0
+run_b2   db "bin\train.exe tiny run=restest_b data=scratch\restest\*.tok", 0
+s_scr    db "scratch", 0
+s_dir    db "scratch\restest", 0
+src      db "datasets\fineweb\shard_00000.tok", 0
+dst      db "scratch\restest\part_0.tok", 0
+PARTTOK  equ 10000              ; ~9.8 tiny steps per file
 pat_a    db "checkpoints\restest_a\*.ckpt", 0
 pat_b    db "checkpoints\restest_b\*.ckpt", 0
 log_a    db "logs\restest_a.log", 0
@@ -31,6 +38,8 @@ code     resd 1
 fa       resq 1
 fb       resq 1
 sza      resq 1
+fh       resq 1
+namebuf  resb 256
 
 section .text
 
@@ -47,6 +56,7 @@ start:
     call file_delete
     lea rcx, [log_b]
     call file_delete
+    call parts
 
     lea rcx, [run_a]
     call run
@@ -94,6 +104,64 @@ start:
 section .rdata
 m_same db "both end on the same weights, adam state, step, data position and rng, bit for bit", 0
 section .text
+
+; scratch\restest\part_{0,1,2}.tok: the header and first PARTTOK tokens of
+; shards 0, 1, 2, with the token count patched to match
+parts:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    lea rcx, [s_scr]
+    call make_dir
+    lea rcx, [s_dir]
+    call make_dir
+    mov ecx, 65536
+    call mem_alloc
+    mov rsi, rax
+    lea rbx, [namebuf]
+    xor edi, edi
+.f:
+    ; copy the names and bump the digit
+    mov rcx, rbx
+    lea rdx, [src]
+    call fmt_str
+    mov byte [rax], 0
+    add [rax-5], dil            ; shard_0000N.tok
+    lea rcx, [rbx+128]
+    lea rdx, [dst]
+    call fmt_str
+    mov byte [rax], 0
+    add [rax-5], dil            ; part_N.tok
+    mov rcx, rbx
+    call file_open
+    mov [fh], rax
+    mov rcx, rax
+    mov rdx, rsi
+    mov r8d, TF_SIZE + PARTTOK * 2
+    call file_read
+    mov rcx, [fh]
+    call file_close
+    mov qword [rsi+TF_NTOK], PARTTOK
+    lea rcx, [rbx+128]
+    call file_create
+    mov [fh], rax
+    mov rcx, rax
+    mov rdx, rsi
+    mov r8d, TF_SIZE + PARTTOK * 2
+    call file_write
+    mov rcx, [fh]
+    call file_close
+    inc edi
+    cmp edi, 3
+    jb .f
+    mov rcx, rsi
+    call mem_free
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
 
 ; rcx = pattern. deletes whatever matches
 wipe:
