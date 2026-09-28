@@ -150,11 +150,17 @@ store:
 // 4 x 4 mma tiles, 64 accumulators per thread.
 //  - global -> shared with cp.async (16 bytes each, no registers involved), in two
 //    stages: the next k tile streams in while this one is being multiplied
-//  - shared rows are padded from 32 to 40 bf16 (80 bytes), so the 8 rows one
-//    ldmatrix reads start in 8 different 4-bank groups: no bank conflicts
 //  - shared -> registers with ldmatrix.x4, which hands out exactly the mma
-//    fragment layout
-// shared per stage: A 128x40 + W 128x40 bf16 = 20480 bytes, two stages.
+//    fragment layout. .trans does the same for an operand stored the other way
+//    round, so every layout the model needs runs at the same speed:
+//      flag 1: A stored [K][M] (A^T),  flag 2: B stored [K][N]
+//    forward x W^T is neither, dx = dy W is flag 2, dW = dy^T x is both
+//  - flag 4: C comes out as bf16. pr (f32, optional): C = R + A B^T, done by
+//    starting the accumulators at R. R can be C, which is how gradients add up
+//  - untransposed tiles are 128 rows of 32 k, padded to 40 (80 bytes), so the 8
+//    rows one ldmatrix reads start in 8 different 4-bank groups: no conflicts.
+//    transposed ones are 32 k-rows of 128, padded to 136 (272 bytes), same idea
+// shared per stage: A (10240 bytes max) + B = 20480, two stages.
 // grid (N/128, M/128), block 256. needs M%128 == 0, N%128 == 0, K%32 == 0
 .visible .entry gemm_tc(
     .param .u64 pa,
@@ -162,12 +168,14 @@ store:
     .param .u64 pc,
     .param .u32 pm,
     .param .u32 pn,
-    .param .u32 pk)
+    .param .u32 pk,
+    .param .u64 pr,
+    .param .u32 pf)
 {
     .shared .align 16 .b8 sm[40960];
-    .reg .pred  %p;
-    .reg .b32   %r<48>;
-    .reg .b64   %rd<24>;
+    .reg .pred  %p, %pta, %ptb, %pbf, %pr;
+    .reg .b32   %r<80>;
+    .reg .b64   %rd<40>;
     .reg .f32   %f<64>;                         // accumulator (mi, ni, j) is f[16mi + 4ni + j]
     .reg .b32   %ra<16>;                        // A fragment (mi, j) is ra[4mi + j]
     .reg .b32   %rb<8>;                         // B fragment (ni, j) is rb[2ni + j]
@@ -175,8 +183,18 @@ store:
     ld.param.u64    %rd1, [pa];
     ld.param.u64    %rd2, [pw];
     ld.param.u64    %rd3, [pc];
+    ld.param.u32    %r1, [pm];
     ld.param.u32    %r2, [pn];
     ld.param.u32    %r3, [pk];
+    ld.param.u64    %rd30, [pr];
+    setp.ne.u64     %pr, %rd30, 0;
+    ld.param.u32    %r60, [pf];
+    and.b32         %r61, %r60, 1;
+    setp.ne.u32     %pta, %r61, 0;
+    and.b32         %r61, %r60, 2;
+    setp.ne.u32     %ptb, %r61, 0;
+    and.b32         %r61, %r60, 4;
+    setp.ne.u32     %pbf, %r61, 0;
     mov.u32         %r4, %tid.x;
     shr.u32         %r5, %r4, 5;                // warp
     and.b32         %r6, %r4, 31;               // lane
@@ -186,64 +204,174 @@ store:
     shl.b32         %r8, %r8, 7;                // bn
     mov.u32         %r9, sm;
 
-    // what this thread copies: rows r and r+64 (r = tid/4) of both tiles, 8 bf16 at c = (tid%4)*8
-    shr.u32         %r10, %r4, 2;
+    // what this thread copies, 16 bytes at a time: two rows of the A tile and two
+    // of the B tile. gA0/gA1 (rd5, rd7) -> sA0/sA1 (r16, r17), step per k tile rd20
+    @%pta bra       acopyt;
+    shr.u32         %r10, %r4, 2;               // rows r and r+64, 8 k at (tid%4)*8
     and.b32         %r11, %r4, 3;
     shl.b32         %r11, %r11, 3;
     add.u32         %r12, %r7, %r10;
     mad.lo.u32      %r12, %r12, %r3, %r11;
     mul.wide.u32    %rd4, %r12, 2;
-    add.u64         %rd5, %rd1, %rd4;           // global A, row r
-    shl.b32         %r13, %r3, 7;               // 64 rows in bytes
+    add.u64         %rd5, %rd1, %rd4;
+    shl.b32         %r13, %r3, 7;               // 64 rows
     cvt.u64.u32     %rd6, %r13;
-    add.u64         %rd7, %rd5, %rd6;           // global A, row r+64
-    add.u32         %r12, %r8, %r10;
-    mad.lo.u32      %r12, %r12, %r3, %r11;
-    mul.wide.u32    %rd4, %r12, 2;
-    add.u64         %rd8, %rd2, %rd4;           // global W, row r
-    add.u64         %rd9, %rd8, %rd6;           // global W, row r+64
+    add.u64         %rd7, %rd5, %rd6;
+    mov.u64         %rd20, 64;                  // 32 k
     mul.lo.u32      %r14, %r10, 80;
     shl.b32         %r15, %r11, 1;
     add.u32         %r14, %r14, %r15;
-    add.u32         %r16, %r9, %r14;            // shared A, row r (stage 0)
-    add.u32         %r17, %r16, 5120;           // shared A, row r+64
-    add.u32         %r18, %r16, 10240;          // shared W, row r
-    add.u32         %r19, %r16, 15360;          // shared W, row r+64
+    add.u32         %r16, %r9, %r14;
+    add.u32         %r17, %r16, 5120;
+    bra             acopyd;
+acopyt:
+    shr.u32         %r10, %r4, 4;               // k rows r and r+16, 8 m at (tid%16)*8
+    and.b32         %r11, %r4, 15;
+    shl.b32         %r11, %r11, 3;
+    add.u32         %r12, %r7, %r11;
+    mad.lo.u32      %r12, %r10, %r1, %r12;
+    mul.wide.u32    %rd4, %r12, 2;
+    add.u64         %rd5, %rd1, %rd4;
+    shl.b32         %r13, %r1, 5;               // 16 rows
+    cvt.u64.u32     %rd6, %r13;
+    add.u64         %rd7, %rd5, %rd6;
+    mul.wide.u32    %rd20, %r1, 64;             // 32 rows
+    mul.lo.u32      %r14, %r10, 272;
+    shl.b32         %r15, %r11, 1;
+    add.u32         %r14, %r14, %r15;
+    add.u32         %r16, %r9, %r14;
+    add.u32         %r17, %r16, 4352;
+acopyd:
+    @%ptb bra       bcopyt;
+    shr.u32         %r10, %r4, 2;
+    and.b32         %r11, %r4, 3;
+    shl.b32         %r11, %r11, 3;
+    add.u32         %r12, %r8, %r10;
+    mad.lo.u32      %r12, %r12, %r3, %r11;
+    mul.wide.u32    %rd4, %r12, 2;
+    add.u64         %rd8, %rd2, %rd4;
+    shl.b32         %r13, %r3, 7;
+    cvt.u64.u32     %rd6, %r13;
+    add.u64         %rd9, %rd8, %rd6;
+    mov.u64         %rd21, 64;
+    mul.lo.u32      %r14, %r10, 80;
+    shl.b32         %r15, %r11, 1;
+    add.u32         %r14, %r14, %r15;
+    add.u32         %r18, %r9, %r14;
+    add.u32         %r18, %r18, 10240;
+    add.u32         %r19, %r18, 5120;
+    bra             bcopyd;
+bcopyt:
+    shr.u32         %r10, %r4, 4;
+    and.b32         %r11, %r4, 15;
+    shl.b32         %r11, %r11, 3;
+    add.u32         %r12, %r8, %r11;
+    mad.lo.u32      %r12, %r10, %r2, %r12;
+    mul.wide.u32    %rd4, %r12, 2;
+    add.u64         %rd8, %rd2, %rd4;
+    shl.b32         %r13, %r2, 5;
+    cvt.u64.u32     %rd6, %r13;
+    add.u64         %rd9, %rd8, %rd6;
+    mul.wide.u32    %rd21, %r2, 64;
+    mul.lo.u32      %r14, %r10, 272;
+    shl.b32         %r15, %r11, 1;
+    add.u32         %r14, %r14, %r15;
+    add.u32         %r18, %r9, %r14;
+    add.u32         %r18, %r18, 10240;
+    add.u32         %r19, %r18, 4352;
+bcopyd:
 
-    // tile 0 into stage 0
+    // tile 0 into stage 0, then point at tile 1
     cp.async.cg.shared.global [%r16], [%rd5], 16;
     cp.async.cg.shared.global [%r17], [%rd7], 16;
     cp.async.cg.shared.global [%r18], [%rd8], 16;
     cp.async.cg.shared.global [%r19], [%rd9], 16;
     cp.async.commit_group;
+    add.u64         %rd5, %rd5, %rd20;
+    add.u64         %rd7, %rd7, %rd20;
+    add.u64         %rd8, %rd8, %rd21;
+    add.u64         %rd9, %rd9, %rd21;
 
-    // ldmatrix addresses in stage 0. warp (wm, wn) = (warp/4, warp%4)
-    //   A: row wm*64 + (lane%16), col (lane/16)*8.   +1280 bytes per mi
-    //   W: row wn*32 + (lane%8) + (lane/16)*8, col ((lane/8)%2)*8.   +1280 per pair of ni
+    // ldmatrix addresses in stage 0 (lA r27, lB r30), and how far apart the
+    // fragments are: next mi (r50) and k 16..31 (r51) for A, next n pair (r52)
+    // and k 16..31 (r53) for B. warp (wm, wn) = (warp/4, warp%4)
     shr.u32         %r22, %r5, 2;               // wm
     and.b32         %r23, %r5, 3;               // wn
+    and.b32         %r40, %r6, 7;               // lane%8
+    shr.u32         %r41, %r6, 3;
+    and.b32         %r41, %r41, 1;              // (lane/8)%2
+    shr.u32         %r42, %r6, 4;               // lane/16
+    @%pta bra       lat;
+    // A: row wm*64 + lane%16, col (lane/16)*8
     and.b32         %r24, %r6, 15;
     shl.b32         %r25, %r22, 6;
     add.u32         %r24, %r24, %r25;
     mul.lo.u32      %r24, %r24, 80;
-    shr.u32         %r26, %r6, 4;
-    shl.b32         %r26, %r26, 4;
+    shl.b32         %r26, %r42, 4;
     add.u32         %r24, %r24, %r26;
-    add.u32         %r27, %r9, %r24;            // lA
-    and.b32         %r28, %r6, 7;
-    shr.u32         %r29, %r6, 4;
-    shl.b32         %r29, %r29, 3;
-    add.u32         %r28, %r28, %r29;
+    add.u32         %r27, %r9, %r24;
+    mov.u32         %r50, 1280;
+    mov.u32         %r51, 32;
+    bra             lad;
+lat:
+    // A^T: k row lane%8 + (lane/16)*8, m col wm*64 + ((lane/8)%2)*8
+    shl.b32         %r24, %r42, 3;
+    add.u32         %r24, %r24, %r40;
+    mul.lo.u32      %r24, %r24, 272;
+    shl.b32         %r25, %r22, 6;
+    shl.b32         %r26, %r41, 3;
+    add.u32         %r25, %r25, %r26;
+    shl.b32         %r25, %r25, 1;
+    add.u32         %r24, %r24, %r25;
+    add.u32         %r27, %r9, %r24;
+    mov.u32         %r50, 32;
+    mov.u32         %r51, 4352;
+lad:
+    @%ptb bra       lbt;
+    // B: n row wn*32 + lane%8 + (lane/16)*8, k col ((lane/8)%2)*8
+    shl.b32         %r28, %r42, 3;
+    add.u32         %r28, %r28, %r40;
     shl.b32         %r29, %r23, 5;
     add.u32         %r28, %r28, %r29;
     mul.lo.u32      %r28, %r28, 80;
-    shr.u32         %r29, %r6, 3;
-    and.b32         %r29, %r29, 1;
-    shl.b32         %r29, %r29, 4;
+    shl.b32         %r29, %r41, 4;
     add.u32         %r28, %r28, %r29;
     add.u32         %r28, %r28, 10240;
-    add.u32         %r30, %r9, %r28;            // lB
+    add.u32         %r30, %r9, %r28;
+    mov.u32         %r52, 1280;
+    mov.u32         %r53, 32;
+    bra             lbd;
+lbt:
+    // B^T: k row lane%8 + ((lane/8)%2)*8, n col wn*32 + (lane/16)*8
+    shl.b32         %r28, %r41, 3;
+    add.u32         %r28, %r28, %r40;
+    mul.lo.u32      %r28, %r28, 272;
+    shl.b32         %r29, %r23, 5;
+    shl.b32         %r31, %r42, 3;
+    add.u32         %r29, %r29, %r31;
+    shl.b32         %r29, %r29, 1;
+    add.u32         %r28, %r28, %r29;
+    add.u32         %r28, %r28, 10240;
+    add.u32         %r30, %r9, %r28;
+    mov.u32         %r52, 32;
+    mov.u32         %r53, 4352;
+lbd:
 
+    // where this thread's part of C is: rows bm + wm*64 + 16mi + g (and +8),
+    // cols bn + wn*32 + 8ni + 2t. r45 = row*N + col
+    shr.u32         %r38, %r6, 2;               // g
+    and.b32         %r39, %r6, 3;
+    shl.b32         %r39, %r39, 1;              // 2t
+    shl.b32         %r43, %r22, 6;
+    add.u32         %r43, %r43, %r7;
+    add.u32         %r43, %r43, %r38;
+    shl.b32         %r44, %r23, 5;
+    add.u32         %r44, %r44, %r8;
+    add.u32         %r44, %r44, %r39;
+    mad.lo.u32      %r45, %r43, %r2, %r44;
+    cvt.u64.u32     %rd14, %r2;
+
+    @%pr bra        initr;
     mov.f32 %f0, 0f00000000;   mov.f32 %f1, 0f00000000;   mov.f32 %f2, 0f00000000;   mov.f32 %f3, 0f00000000;
     mov.f32 %f4, 0f00000000;   mov.f32 %f5, 0f00000000;   mov.f32 %f6, 0f00000000;   mov.f32 %f7, 0f00000000;
     mov.f32 %f8, 0f00000000;   mov.f32 %f9, 0f00000000;   mov.f32 %f10, 0f00000000;  mov.f32 %f11, 0f00000000;
@@ -260,31 +388,75 @@ store:
     mov.f32 %f52, 0f00000000;  mov.f32 %f53, 0f00000000;  mov.f32 %f54, 0f00000000;  mov.f32 %f55, 0f00000000;
     mov.f32 %f56, 0f00000000;  mov.f32 %f57, 0f00000000;  mov.f32 %f58, 0f00000000;  mov.f32 %f59, 0f00000000;
     mov.f32 %f60, 0f00000000;  mov.f32 %f61, 0f00000000;  mov.f32 %f62, 0f00000000;  mov.f32 %f63, 0f00000000;
+    bra             kstart;
+initr:
+    mul.wide.u32    %rd12, %r45, 4;
+    add.u64         %rd13, %rd30, %rd12;        // R, row g
+    shl.b64         %rd15, %rd14, 5;            // 8 rows of f32
+    shl.b64         %rd16, %rd14, 6;            // 16 rows
+    add.u64         %rd17, %rd13, %rd15;        // row g+8
+    ld.global.v2.f32 {%f0, %f1}, [%rd13];
+    ld.global.v2.f32 {%f2, %f3}, [%rd17];
+    ld.global.v2.f32 {%f4, %f5}, [%rd13+32];
+    ld.global.v2.f32 {%f6, %f7}, [%rd17+32];
+    ld.global.v2.f32 {%f8, %f9}, [%rd13+64];
+    ld.global.v2.f32 {%f10, %f11}, [%rd17+64];
+    ld.global.v2.f32 {%f12, %f13}, [%rd13+96];
+    ld.global.v2.f32 {%f14, %f15}, [%rd17+96];
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    ld.global.v2.f32 {%f16, %f17}, [%rd13];
+    ld.global.v2.f32 {%f18, %f19}, [%rd17];
+    ld.global.v2.f32 {%f20, %f21}, [%rd13+32];
+    ld.global.v2.f32 {%f22, %f23}, [%rd17+32];
+    ld.global.v2.f32 {%f24, %f25}, [%rd13+64];
+    ld.global.v2.f32 {%f26, %f27}, [%rd17+64];
+    ld.global.v2.f32 {%f28, %f29}, [%rd13+96];
+    ld.global.v2.f32 {%f30, %f31}, [%rd17+96];
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    ld.global.v2.f32 {%f32, %f33}, [%rd13];
+    ld.global.v2.f32 {%f34, %f35}, [%rd17];
+    ld.global.v2.f32 {%f36, %f37}, [%rd13+32];
+    ld.global.v2.f32 {%f38, %f39}, [%rd17+32];
+    ld.global.v2.f32 {%f40, %f41}, [%rd13+64];
+    ld.global.v2.f32 {%f42, %f43}, [%rd17+64];
+    ld.global.v2.f32 {%f44, %f45}, [%rd13+96];
+    ld.global.v2.f32 {%f46, %f47}, [%rd17+96];
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    ld.global.v2.f32 {%f48, %f49}, [%rd13];
+    ld.global.v2.f32 {%f50, %f51}, [%rd17];
+    ld.global.v2.f32 {%f52, %f53}, [%rd13+32];
+    ld.global.v2.f32 {%f54, %f55}, [%rd17+32];
+    ld.global.v2.f32 {%f56, %f57}, [%rd13+64];
+    ld.global.v2.f32 {%f58, %f59}, [%rd17+64];
+    ld.global.v2.f32 {%f60, %f61}, [%rd13+96];
+    ld.global.v2.f32 {%f62, %f63}, [%rd17+96];
 
+kstart:
     shr.u32         %r20, %r3, 5;               // k tiles
     mov.u32         %r21, 0;                    // this one
 kloop:
     // start the next tile into the other stage, if there is one
-    add.u32         %r31, %r21, 1;
-    setp.ge.u32     %p, %r31, %r20;
+    add.u32         %r32, %r21, 1;
+    setp.ge.u32     %p, %r32, %r20;
     @%p bra         last;
-    and.b32         %r32, %r31, 1;
-    mul.lo.u32      %r32, %r32, 20480;
-    shl.b32         %r33, %r31, 6;              // 32 bf16 per k tile = 64 bytes
-    cvt.u64.u32     %rd10, %r33;
-    add.u32         %r34, %r16, %r32;
-    add.u64         %rd11, %rd5, %rd10;
-    cp.async.cg.shared.global [%r34], [%rd11], 16;
-    add.u32         %r34, %r17, %r32;
-    add.u64         %rd11, %rd7, %rd10;
-    cp.async.cg.shared.global [%r34], [%rd11], 16;
-    add.u32         %r34, %r18, %r32;
-    add.u64         %rd11, %rd8, %rd10;
-    cp.async.cg.shared.global [%r34], [%rd11], 16;
-    add.u32         %r34, %r19, %r32;
-    add.u64         %rd11, %rd9, %rd10;
-    cp.async.cg.shared.global [%r34], [%rd11], 16;
+    and.b32         %r33, %r32, 1;
+    mul.lo.u32      %r33, %r33, 20480;
+    add.u32         %r34, %r16, %r33;
+    cp.async.cg.shared.global [%r34], [%rd5], 16;
+    add.u32         %r34, %r17, %r33;
+    cp.async.cg.shared.global [%r34], [%rd7], 16;
+    add.u32         %r34, %r18, %r33;
+    cp.async.cg.shared.global [%r34], [%rd8], 16;
+    add.u32         %r34, %r19, %r33;
+    cp.async.cg.shared.global [%r34], [%rd9], 16;
     cp.async.commit_group;
+    add.u64         %rd5, %rd5, %rd20;
+    add.u64         %rd7, %rd7, %rd20;
+    add.u64         %rd8, %rd8, %rd21;
+    add.u64         %rd9, %rd9, %rd21;
     cp.async.wait_group 1;                      // all but the newest group: this tile is in
     bra             ready;
 last:
@@ -293,16 +465,26 @@ ready:
     bar.sync        0;
     and.b32         %r35, %r21, 1;
     mul.lo.u32      %r35, %r35, 20480;
-    add.u32         %r36, %r27, %r35;           // lA this stage
-    add.u32         %r37, %r30, %r35;           // lB this stage
+    add.u32         %r36, %r27, %r35;           // A, mi 0
+    add.u32         %r54, %r36, %r50;           // mi 1
+    add.u32         %r55, %r54, %r50;           // mi 2
+    add.u32         %r56, %r55, %r50;           // mi 3
+    add.u32         %r37, %r30, %r35;           // B, n tiles 0-1
+    add.u32         %r57, %r37, %r52;           // n tiles 2-3
 
     // k 0..15 of the tile
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r36+1280];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r36+2560];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r36+3840];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r37+1280];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r54];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r54];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r55];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r55];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r56];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r56];
+    @!%ptb ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37];
+    @%ptb  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37];
+    @!%ptb ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r57];
+    @%ptb  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r57];
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f0, %f1, %f2, %f3}, {%ra0, %ra1, %ra2, %ra3}, {%rb0, %rb1}, {%f0, %f1, %f2, %f3};
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f4, %f5, %f6, %f7}, {%ra0, %ra1, %ra2, %ra3}, {%rb2, %rb3}, {%f4, %f5, %f6, %f7};
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f8, %f9, %f10, %f11}, {%ra0, %ra1, %ra2, %ra3}, {%rb4, %rb5}, {%f8, %f9, %f10, %f11};
@@ -320,13 +502,25 @@ ready:
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f56, %f57, %f58, %f59}, {%ra12, %ra13, %ra14, %ra15}, {%rb4, %rb5}, {%f56, %f57, %f58, %f59};
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f60, %f61, %f62, %f63}, {%ra12, %ra13, %ra14, %ra15}, {%rb6, %rb7}, {%f60, %f61, %f62, %f63};
 
-    // k 16..31, 32 bytes further along each row
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36+32];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r36+1312];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r36+2592];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r36+3872];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37+32];
-    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r37+1312];
+    // k 16..31
+    add.u32         %r36, %r36, %r51;
+    add.u32         %r54, %r54, %r51;
+    add.u32         %r55, %r55, %r51;
+    add.u32         %r56, %r56, %r51;
+    add.u32         %r37, %r37, %r53;
+    add.u32         %r57, %r57, %r53;
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r54];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r54];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r55];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r55];
+    @!%pta ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r56];
+    @%pta  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%ra12, %ra13, %ra14, %ra15}, [%r56];
+    @!%ptb ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37];
+    @%ptb  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%rb0, %rb1, %rb2, %rb3}, [%r37];
+    @!%ptb ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r57];
+    @%ptb  ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%rb4, %rb5, %rb6, %rb7}, [%r57];
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f0, %f1, %f2, %f3}, {%ra0, %ra1, %ra2, %ra3}, {%rb0, %rb1}, {%f0, %f1, %f2, %f3};
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f4, %f5, %f6, %f7}, {%ra0, %ra1, %ra2, %ra3}, {%rb2, %rb3}, {%f4, %f5, %f6, %f7};
     mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f8, %f9, %f10, %f11}, {%ra0, %ra1, %ra2, %ra3}, {%rb4, %rb5}, {%f8, %f9, %f10, %f11};
@@ -349,20 +543,9 @@ ready:
     setp.lt.u32     %p, %r21, %r20;
     @%p bra         kloop;
 
-    // C: rows bm + wm*64 + 16mi + g (and +8), cols bn + wn*32 + 8ni + 2t
-    shr.u32         %r38, %r6, 2;               // g
-    and.b32         %r39, %r6, 3;
-    shl.b32         %r39, %r39, 1;              // 2t
-    shl.b32         %r40, %r22, 6;
-    add.u32         %r40, %r40, %r7;
-    add.u32         %r40, %r40, %r38;           // row
-    shl.b32         %r41, %r23, 5;
-    add.u32         %r41, %r41, %r8;
-    add.u32         %r41, %r41, %r39;           // col
-    mad.lo.u32      %r42, %r40, %r2, %r41;
-    mul.wide.u32    %rd12, %r42, 4;
+    @%pbf bra       store16;
+    mul.wide.u32    %rd12, %r45, 4;
     add.u64         %rd13, %rd3, %rd12;         // p: row g
-    cvt.u64.u32     %rd14, %r2;
     shl.b64         %rd15, %rd14, 5;            // 8 rows of C
     shl.b64         %rd16, %rd14, 6;            // 16 rows of C
     add.u64         %rd17, %rd13, %rd15;        // q: row g+8
@@ -405,6 +588,85 @@ ready:
     st.global.v2.f32 [%rd13+96], {%f60, %f61};
     st.global.v2.f32 [%rd17+96], {%f62, %f63};
     ret;
+
+    // bf16 C: each pair of columns packs into one 32 bit store (low half = even column)
+store16:
+    mul.wide.u32    %rd12, %r45, 2;
+    add.u64         %rd13, %rd3, %rd12;
+    shl.b64         %rd15, %rd14, 4;            // 8 rows of bf16
+    shl.b64         %rd16, %rd14, 5;            // 16 rows
+    add.u64         %rd17, %rd13, %rd15;
+    cvt.rn.bf16x2.f32 %r70, %f1, %f0;
+    cvt.rn.bf16x2.f32 %r71, %f3, %f2;
+    cvt.rn.bf16x2.f32 %r72, %f5, %f4;
+    cvt.rn.bf16x2.f32 %r73, %f7, %f6;
+    cvt.rn.bf16x2.f32 %r74, %f9, %f8;
+    cvt.rn.bf16x2.f32 %r75, %f11, %f10;
+    cvt.rn.bf16x2.f32 %r76, %f13, %f12;
+    cvt.rn.bf16x2.f32 %r77, %f15, %f14;
+    st.global.b32   [%rd13], %r70;
+    st.global.b32   [%rd17], %r71;
+    st.global.b32   [%rd13+16], %r72;
+    st.global.b32   [%rd17+16], %r73;
+    st.global.b32   [%rd13+32], %r74;
+    st.global.b32   [%rd17+32], %r75;
+    st.global.b32   [%rd13+48], %r76;
+    st.global.b32   [%rd17+48], %r77;
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    cvt.rn.bf16x2.f32 %r70, %f17, %f16;
+    cvt.rn.bf16x2.f32 %r71, %f19, %f18;
+    cvt.rn.bf16x2.f32 %r72, %f21, %f20;
+    cvt.rn.bf16x2.f32 %r73, %f23, %f22;
+    cvt.rn.bf16x2.f32 %r74, %f25, %f24;
+    cvt.rn.bf16x2.f32 %r75, %f27, %f26;
+    cvt.rn.bf16x2.f32 %r76, %f29, %f28;
+    cvt.rn.bf16x2.f32 %r77, %f31, %f30;
+    st.global.b32   [%rd13], %r70;
+    st.global.b32   [%rd17], %r71;
+    st.global.b32   [%rd13+16], %r72;
+    st.global.b32   [%rd17+16], %r73;
+    st.global.b32   [%rd13+32], %r74;
+    st.global.b32   [%rd17+32], %r75;
+    st.global.b32   [%rd13+48], %r76;
+    st.global.b32   [%rd17+48], %r77;
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    cvt.rn.bf16x2.f32 %r70, %f33, %f32;
+    cvt.rn.bf16x2.f32 %r71, %f35, %f34;
+    cvt.rn.bf16x2.f32 %r72, %f37, %f36;
+    cvt.rn.bf16x2.f32 %r73, %f39, %f38;
+    cvt.rn.bf16x2.f32 %r74, %f41, %f40;
+    cvt.rn.bf16x2.f32 %r75, %f43, %f42;
+    cvt.rn.bf16x2.f32 %r76, %f45, %f44;
+    cvt.rn.bf16x2.f32 %r77, %f47, %f46;
+    st.global.b32   [%rd13], %r70;
+    st.global.b32   [%rd17], %r71;
+    st.global.b32   [%rd13+16], %r72;
+    st.global.b32   [%rd17+16], %r73;
+    st.global.b32   [%rd13+32], %r74;
+    st.global.b32   [%rd17+32], %r75;
+    st.global.b32   [%rd13+48], %r76;
+    st.global.b32   [%rd17+48], %r77;
+    add.u64         %rd13, %rd13, %rd16;
+    add.u64         %rd17, %rd17, %rd16;
+    cvt.rn.bf16x2.f32 %r70, %f49, %f48;
+    cvt.rn.bf16x2.f32 %r71, %f51, %f50;
+    cvt.rn.bf16x2.f32 %r72, %f53, %f52;
+    cvt.rn.bf16x2.f32 %r73, %f55, %f54;
+    cvt.rn.bf16x2.f32 %r74, %f57, %f56;
+    cvt.rn.bf16x2.f32 %r75, %f59, %f58;
+    cvt.rn.bf16x2.f32 %r76, %f61, %f60;
+    cvt.rn.bf16x2.f32 %r77, %f63, %f62;
+    st.global.b32   [%rd13], %r70;
+    st.global.b32   [%rd17], %r71;
+    st.global.b32   [%rd13+16], %r72;
+    st.global.b32   [%rd17+16], %r73;
+    st.global.b32   [%rd13+32], %r74;
+    st.global.b32   [%rd17+32], %r75;
+    st.global.b32   [%rd13+48], %r76;
+    st.global.b32   [%rd17+48], %r77;
+    ret;
 }
 
 // the general reference matmul, what the model's naive path uses and what every
@@ -418,10 +680,10 @@ ready:
     .param .u64 pa,
     .param .u64 pw,
     .param .u64 pc,
-    .param .u64 pr,
     .param .u32 pm,
     .param .u32 pn,
     .param .u32 pk,
+    .param .u64 pr,
     .param .u32 pf)
 {
     .reg .pred  %p, %pf, %pbf;

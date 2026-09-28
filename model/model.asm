@@ -150,10 +150,10 @@ section .text
     karg 0, %1
     karg 1, %2
     karg 2, %3
-    karg 3, %4
-    karg 4, %5
-    karg 5, %6
-    karg 6, %7
+    karg 3, %5
+    karg 4, %6
+    karg 5, %7
+    karg 6, %4
     karg 7, %8
     call mm_go
 %endmacro
@@ -197,10 +197,10 @@ mm_go:
     or dword [kl+KL_ARGS+56], MM_F32
 .ref:
     KF mm_ref_f
-    mov ecx, [kl+KL_ARGS+40]    ; N
+    mov ecx, [kl+KL_ARGS+32]    ; N
     add ecx, 15
     shr ecx, 4
-    mov edx, [kl+KL_ARGS+32]    ; M
+    mov edx, [kl+KL_ARGS+24]    ; M
     add edx, 15
     shr edx, 4
     mov r8d, 16
@@ -210,9 +210,9 @@ mm_go:
     ret
 .fast:
     KF mm_tc_f
-    mov ecx, [kl+KL_ARGS+40]
+    mov ecx, [kl+KL_ARGS+32]
     shr ecx, 7
-    mov edx, [kl+KL_ARGS+32]
+    mov edx, [kl+KL_ARGS+24]
     shr edx, 7
     mov r8d, 256
     mov r9d, 1

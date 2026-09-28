@@ -11,7 +11,7 @@ extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_bench, ptx_bench_en
 
 HOSTB  equ 256 << 20            ; pcie test size
 VRAMB  equ 512 << 20            ; each side of the vram copy
-ABYTES equ 128 << 20            ; gemm operands
+ABYTES equ 1024 << 20           ; gemm operands, big enough for dlogits
 CBYTES equ 2048 << 20           ; gemm output, big enough for the logits
 
 section .rdata
@@ -29,16 +29,28 @@ c_1e12   dq 1e12
 c_1e6    dq 1e6
 c_ftok   dq 8.3e8               ; training flops per token for main, fwd + bwd (6N + attention)
 c_toks   dq 5e9
-; gemm shapes: M, N, K, label, and how many of it one forward pass of main does
-; (16 layers, one logits). the model ones use 16 x 1024 tokens per step
+; gemm shapes: M, N, K, label, how many of it one training step of main does
+; (16 layers, one logits), and the layout flags (gemm_tc: 1 = A stored [K][M],
+; 2 = B stored [K][N]). the model ones use 16 x 1024 tokens. weight gradients (both
+; flags) also add into what's there, like training does
 shapes:
-    dq 4096, 4096, 4096, s_sq4, 0
-    dq 8192, 8192, 8192, s_sq8, 0
-    dq 16384, 1280, 768, s_qkv, 16
-    dq 16384, 768, 768, s_proj, 16
-    dq 16384, 4096, 768, s_up, 16
-    dq 16384, 768, 2048, s_down, 16
-    dq 16384, 32768, 768, s_logit, 1
+    dq 4096, 4096, 4096, s_sq4, 0, 0
+    dq 8192, 8192, 8192, s_sq8, 0, 0
+    dq 16384, 1280, 768, s_qkv, 16, 0
+    dq 16384, 768, 768, s_proj, 16, 0
+    dq 16384, 4096, 768, s_up, 16, 0
+    dq 16384, 768, 2048, s_down, 16, 0
+    dq 16384, 32768, 768, s_logit, 1, 0
+    dq 16384, 768, 1280, s_qkvx, 16, 2
+    dq 16384, 768, 768, s_projx, 16, 2
+    dq 16384, 768, 4096, s_upx, 16, 2
+    dq 16384, 2048, 768, s_downx, 16, 2
+    dq 16384, 768, 32768, s_logitx, 1, 2
+    dq 1280, 768, 16384, s_qkvw, 16, 3
+    dq 768, 768, 16384, s_projw, 16, 3
+    dq 4096, 768, 16384, s_upw, 16, 3
+    dq 768, 2048, 16384, s_downw, 16, 3
+    dq 32768, 768, 16384, s_logitw, 1, 3
     dq 0
 s_sq4   db "4096 x 4096 x 4096       ", 0
 s_sq8   db "8192 x 8192 x 8192       ", 0
@@ -47,6 +59,16 @@ s_proj  db "attn out  16384x768x768  ", 0
 s_up    db "mlp up    16384x4096x768 ", 0
 s_down  db "mlp down  16384x768x2048 ", 0
 s_logit db "logits    16384x32768x768", 0
+s_qkvx   db "qkv dx    16384x768x1280 ", 0
+s_projx  db "attn dx   16384x768x768  ", 0
+s_upx    db "mlp up dx 16384x768x4096 ", 0
+s_downx  db "mlp dn dx 16384x2048x768 ", 0
+s_logitx db "logits dx 16384x768x32768", 0
+s_qkvw   db "qkv dW    1280x768x16384 ", 0
+s_projw  db "attn dW   768x768x16384  ", 0
+s_upw    db "mlp up dW 4096x768x16384 ", 0
+s_downw  db "mlp dn dW 768x2048x16384 ", 0
+s_logitw db "embed dW  32768x768x16384", 0
 
 section .bss
 alignb 8
@@ -604,7 +626,8 @@ matmuls:
     push r12
     push r13
     push r14
-    sub rsp, 40
+    push r15
+    sub rsp, 32
     say 13, 10, "matmul, C = A * W^T, bf16 in, fp32 out (average of 5 after a warm up)", 13, 10
     mov ecx, ABYTES
     call gpu_alloc
@@ -627,6 +650,7 @@ matmuls:
 
     ; the naive ones on 4096^3 for perspective
     say "  4096^3  gemm_ref (plain fma)     "
+    xor r15d, r15d
     mov r12d, 4096
     mov r13d, 4096
     mov r14d, 4096
@@ -650,6 +674,7 @@ matmuls:
     jz .done
     mov r13, [rbx+8]
     mov r14, [rbx+16]
+    mov r15, [rbx+40]
     say "  "
     mov rcx, [rbx+24]
     call print_z
@@ -674,16 +699,15 @@ matmuls:
     addsd xmm0, [mixf]
     movsd [mixf], xmm0
     say 13, 10
-    add rbx, 40
+    add rbx, 48
     jmp .s
 .done:
-    ; what that says about training main on 5b tokens, if the backward pass runs
-    ; about as well as these (it's 2 more matmuls of the same sizes per forward one)
+    ; what that says about training main on 5b tokens
     movsd xmm0, [mixf]
     divsd xmm0, [mixt]
     divsd xmm0, [c_1e9]         ; mixf/ms -> tflops
     movsd [mixt], xmm0
-    say 13, 10, "  a whole forward pass of main (16 layers + logits): "
+    say 13, 10, "  all the matmuls of a training step of main (forward + backward): "
     movsd xmm0, [mixt]
     mov edx, 1
     call print_fixed
@@ -705,7 +729,8 @@ matmuls:
     call gpu_free
     mov rcx, [gC]
     call gpu_free
-    add rsp, 40
+    add rsp, 32
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -714,7 +739,7 @@ matmuls:
     pop rbx
     ret
 
-; esi = which (0 ref, 1 mma1, 2 tc), edi = runs, r12/r13/r14 = M/N/K.
+; esi = which (0 ref, 1 mma1, 2 tc), edi = runs, r12/r13/r14 = M/N/K, r15 = layout flags.
 ; xmm0 = ms per run (after one warm up run)
 timed:
     push rbx
@@ -729,6 +754,13 @@ timed:
     mov [rbx+KL_ARGS+24], r12
     mov [rbx+KL_ARGS+32], r13
     mov [rbx+KL_ARGS+40], r14
+    mov [rbx+KL_ARGS+56], r15
+    xor eax, eax
+    test r15d, 1
+    jz .nor
+    mov rax, [gC]              ; weight gradients add up
+.nor:
+    mov [rbx+KL_ARGS+48], rax
     mov dword [rbx+KL_GZ], 1
     mov dword [rbx+KL_BZ], 1
     mov qword [rbx+KL_STREAM], 0
