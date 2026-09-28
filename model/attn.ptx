@@ -1,0 +1,488 @@
+// causal attention with grouped kv heads. q, k, v come from the fused qkv rows:
+//   row m = b*T + t is [q: H heads | k: KVH heads | v: KVH heads], hd each
+// query head h reads kv head h / (H/KVH). lse (logsumexp per query, natural log)
+// is saved for the backward pass.
+//
+// the att_* kernels are the naive reference: they write out the whole T x T score
+// matrix per head (S, P, dP, dS in f32 scratch), one thread per number. simple
+// enough to trust, fine for tests and small runs
+
+// S[b][h][t][j] = scale * a_t . b_j for j <= t, else masked. two jobs:
+//   mode 0: a = q (rows of the qkv), b = k, masked = -inf       (scores)
+//   mode 1: a = dy (rows of QD),     b = v, masked = 0, scale 1 (dP in the backward)
+.visible .entry att_dot(
+    .param .u64 pa,
+    .param .u64 pqkv,
+    .param .u64 ps,
+    .param .u32 pb,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .u32 phd,
+    .param .u32 pbf,
+    .param .f32 pscale,
+    .param .u32 pmode)
+{
+    .reg .pred  %p, %pb, %pm;
+    .reg .b32   %r<40>;
+    .reg .b64   %rd<16>;
+    .reg .f32   %f<8>;
+
+    ld.param.u32    %r1, [pb];
+    ld.param.u32    %r2, [pt];
+    ld.param.u32    %r3, [ph];
+    ld.param.u32    %r4, [pkvh];
+    ld.param.u32    %r5, [phd];
+    ld.param.u32    %r6, [pbf];
+    setp.ne.u32     %pb, %r6, 0;
+    selp.u32        %r30, 2, 4, %pb;
+    ld.param.u32    %r6, [pmode];
+    setp.ne.u32     %pm, %r6, 0;
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %ntid.x;
+    mov.u32         %r9, %tid.x;
+    mad.lo.u32      %r10, %r7, %r8, %r9;        // i
+    mul.lo.u32      %r11, %r1, %r3;
+    mul.lo.u32      %r11, %r11, %r2;
+    mul.lo.u32      %r11, %r11, %r2;
+    setp.ge.u32     %p, %r10, %r11;
+    @%p bra         done;
+    rem.u32         %r12, %r10, %r2;            // j
+    div.u32         %r13, %r10, %r2;
+    rem.u32         %r14, %r13, %r2;            // t
+    div.u32         %r15, %r13, %r2;
+    rem.u32         %r16, %r15, %r3;            // h
+    div.u32         %r17, %r15, %r3;            // b
+    ld.param.u64    %rd1, [ps];
+    mul.wide.u32    %rd2, %r10, 4;
+    add.u64         %rd1, %rd1, %rd2;
+    setp.le.u32     %p, %r12, %r14;
+    @%p bra         live;
+    selp.f32        %f1, 0f00000000, 0fFF800000, %pm;
+    st.global.f32   [%rd1], %f1;
+    bra             done;
+live:
+    mul.lo.u32      %r18, %r3, %r5;             // QD
+    mul.lo.u32      %r19, %r4, %r5;             // KVD
+    shl.b32         %r20, %r19, 1;
+    add.u32         %r20, %r20, %r18;           // QKV
+    div.u32         %r21, %r3, %r4;             // group size
+    div.u32         %r22, %r16, %r21;           // kv head
+    selp.u32        %r23, %r18, %r20, %pm;      // a's row length
+    mad.lo.u32      %r24, %r17, %r2, %r14;      // b*T + t
+    mul.lo.u32      %r24, %r24, %r23;
+    mad.lo.u32      %r24, %r16, %r5, %r24;      // a index
+    mad.lo.u32      %r25, %r17, %r2, %r12;      // b*T + j
+    mul.lo.u32      %r25, %r25, %r20;
+    add.u32         %r25, %r25, %r18;
+    mad.lo.u32      %r25, %r22, %r5, %r25;
+    @%pm add.u32    %r25, %r25, %r19;           // b index (k, or v)
+    ld.param.u64    %rd3, [pa];
+    mul.wide.u32    %rd4, %r24, %r30;
+    add.u64         %rd3, %rd3, %rd4;
+    ld.param.u64    %rd5, [pqkv];
+    mul.wide.u32    %rd6, %r25, %r30;
+    add.u64         %rd5, %rd5, %rd6;
+    cvt.u64.u32     %rd7, %r30;
+    mov.f32         %f1, 0f00000000;
+    mov.u32         %r26, 0;
+dl:
+    setp.ge.u32     %p, %r26, %r5;
+    @%p bra         dd;
+    @%pb ld.global.u16 %r27, [%rd3];
+    @%pb ld.global.u16 %r28, [%rd5];
+    @%pb shl.b32    %r27, %r27, 16;
+    @%pb shl.b32    %r28, %r28, 16;
+    @%pb mov.b32    %f2, %r27;
+    @%pb mov.b32    %f3, %r28;
+    @!%pb ld.global.f32 %f2, [%rd3];
+    @!%pb ld.global.f32 %f3, [%rd5];
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    add.u64         %rd3, %rd3, %rd7;
+    add.u64         %rd5, %rd5, %rd7;
+    add.u32         %r26, %r26, 1;
+    bra             dl;
+dd:
+    ld.param.f32    %f4, [pscale];
+    @!%pm mul.f32   %f1, %f1, %f4;
+    st.global.f32   [%rd1], %f1;
+done:
+    ret;
+}
+
+// softmax along each row of S, in place (S becomes P), one thread per row.
+// puse = 0: work out lse and save it. puse = 1: use the saved lse (backward, where
+// the scores got recomputed). masked entries are -inf and come out 0
+.visible .entry att_softmax(
+    .param .u64 ps,
+    .param .u64 plse,
+    .param .u32 pn,
+    .param .u32 pt,
+    .param .u32 puse)
+{
+    .reg .pred  %p, %pu;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<12>;
+    .reg .f32   %f<12>;
+
+    ld.param.u32    %r1, [pn];
+    ld.param.u32    %r2, [pt];
+    ld.param.u32    %r3, [puse];
+    setp.ne.u32     %pu, %r3, 0;
+    mov.u32         %r4, %ctaid.x;
+    mov.u32         %r5, %ntid.x;
+    mov.u32         %r6, %tid.x;
+    mad.lo.u32      %r7, %r4, %r5, %r6;         // row
+    setp.ge.u32     %p, %r7, %r1;
+    @%p bra         done;
+    ld.param.u64    %rd1, [ps];
+    mul.lo.u32      %r8, %r7, %r2;
+    mul.wide.u32    %rd2, %r8, 4;
+    add.u64         %rd1, %rd1, %rd2;           // row start
+    ld.param.u64    %rd3, [plse];
+    mul.wide.u32    %rd4, %r7, 4;
+    add.u64         %rd3, %rd3, %rd4;
+    @%pu ld.global.f32 %f5, [%rd3];
+    @%pu bra        write;
+    mov.f32         %f1, 0fFF800000;
+    mov.u32         %r9, 0;
+    mov.u64         %rd5, %rd1;
+mx:
+    setp.ge.u32     %p, %r9, %r2;
+    @%p bra         mxd;
+    ld.global.f32   %f2, [%rd5];
+    max.f32         %f1, %f1, %f2;
+    add.u64         %rd5, %rd5, 4;
+    add.u32         %r9, %r9, 1;
+    bra             mx;
+mxd:
+    mov.f32         %f3, 0f00000000;
+    mov.u32         %r9, 0;
+    mov.u64         %rd5, %rd1;
+se:
+    setp.ge.u32     %p, %r9, %r2;
+    @%p bra         sed;
+    ld.global.f32   %f2, [%rd5];
+    sub.f32         %f2, %f2, %f1;
+    mul.f32         %f2, %f2, 0f3FB8AA3B;
+    ex2.approx.f32  %f2, %f2;
+    add.f32         %f3, %f3, %f2;
+    add.u64         %rd5, %rd5, 4;
+    add.u32         %r9, %r9, 1;
+    bra             se;
+sed:
+    lg2.approx.f32  %f4, %f3;
+    fma.rn.f32      %f5, %f4, 0f3F317218, %f1;  // lse = max + ln(sum)
+    st.global.f32   [%rd3], %f5;
+write:
+    mov.u32         %r9, 0;
+    mov.u64         %rd5, %rd1;
+wl:
+    setp.ge.u32     %p, %r9, %r2;
+    @%p bra         done;
+    ld.global.f32   %f2, [%rd5];
+    sub.f32         %f2, %f2, %f5;
+    mul.f32         %f2, %f2, 0f3FB8AA3B;
+    ex2.approx.f32  %f2, %f2;
+    st.global.f32   [%rd5], %f2;
+    add.u64         %rd5, %rd5, 4;
+    add.u32         %r9, %r9, 1;
+    bra             wl;
+done:
+    ret;
+}
+
+// one thread per output number, summing a row of P (or dS) against a column of kv:
+//   mode 0: y[m][h][d]      = sum_j P[b,h,t,j] v[b,j,kvh][d]           (y is [M][QD])
+//   mode 1: dq[m][h][d] = scale sum_j dS[b,h,t,j] k[b,j,kvh][d]        (into dqkv's q part)
+.visible .entry att_mix(
+    .param .u64 pp,
+    .param .u64 pqkv,
+    .param .u64 pout,
+    .param .u32 pb,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .u32 phd,
+    .param .u32 pbf,
+    .param .f32 pscale,
+    .param .u32 pmode)
+{
+    .reg .pred  %p, %pb, %pm;
+    .reg .b32   %r<40>;
+    .reg .b64   %rd<16>;
+    .reg .f32   %f<8>;
+    .reg .b16   %h;
+
+    ld.param.u32    %r1, [pb];
+    ld.param.u32    %r2, [pt];
+    ld.param.u32    %r3, [ph];
+    ld.param.u32    %r4, [pkvh];
+    ld.param.u32    %r5, [phd];
+    ld.param.u32    %r6, [pbf];
+    setp.ne.u32     %pb, %r6, 0;
+    selp.u32        %r30, 2, 4, %pb;
+    ld.param.u32    %r6, [pmode];
+    setp.ne.u32     %pm, %r6, 0;
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %ntid.x;
+    mov.u32         %r9, %tid.x;
+    mad.lo.u32      %r10, %r7, %r8, %r9;        // i
+    mul.lo.u32      %r11, %r1, %r2;
+    mul.lo.u32      %r11, %r11, %r3;
+    mul.lo.u32      %r11, %r11, %r5;
+    setp.ge.u32     %p, %r10, %r11;
+    @%p bra         done;
+    rem.u32         %r12, %r10, %r5;            // d
+    div.u32         %r13, %r10, %r5;
+    rem.u32         %r14, %r13, %r3;            // h
+    div.u32         %r15, %r13, %r3;            // m
+    div.u32         %r16, %r15, %r2;            // b
+    rem.u32         %r17, %r15, %r2;            // t
+    mul.lo.u32      %r18, %r3, %r5;             // QD
+    mul.lo.u32      %r19, %r4, %r5;             // KVD
+    shl.b32         %r20, %r19, 1;
+    add.u32         %r20, %r20, %r18;           // QKV
+    div.u32         %r21, %r3, %r4;
+    div.u32         %r22, %r14, %r21;           // kv head
+    // P row
+    mad.lo.u32      %r23, %r16, %r3, %r14;
+    mad.lo.u32      %r23, %r23, %r2, %r17;
+    mul.lo.u32      %r23, %r23, %r2;
+    ld.param.u64    %rd1, [pp];
+    mul.wide.u32    %rd2, %r23, 4;
+    add.u64         %rd1, %rd1, %rd2;
+    // column: row b*T of the qkv, then k (mode 1) or v (mode 0) of this kv head
+    mul.lo.u32      %r24, %r16, %r2;
+    mul.lo.u32      %r24, %r24, %r20;
+    add.u32         %r24, %r24, %r18;
+    mad.lo.u32      %r24, %r22, %r5, %r24;
+    add.u32         %r24, %r24, %r12;
+    @!%pm add.u32   %r24, %r24, %r19;
+    ld.param.u64    %rd3, [pqkv];
+    mul.wide.u32    %rd4, %r24, %r30;
+    add.u64         %rd3, %rd3, %rd4;
+    mul.wide.u32    %rd5, %r20, %r30;           // one qkv row in bytes
+    mov.f32         %f1, 0f00000000;
+    mov.u32         %r25, 0;
+jl:
+    setp.gt.u32     %p, %r25, %r17;
+    @%p bra         jd;
+    ld.global.f32   %f2, [%rd1];
+    @%pb ld.global.u16 %r26, [%rd3];
+    @%pb shl.b32    %r26, %r26, 16;
+    @%pb mov.b32    %f3, %r26;
+    @!%pb ld.global.f32 %f3, [%rd3];
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    add.u64         %rd1, %rd1, 4;
+    add.u64         %rd3, %rd3, %rd5;
+    add.u32         %r25, %r25, 1;
+    bra             jl;
+jd:
+    ld.param.f32    %f4, [pscale];
+    @%pm mul.f32    %f1, %f1, %f4;
+    // out index: mode 0 m*QD + h*HD + d (= i), mode 1 m*QKV + h*HD + d
+    selp.u32        %r27, %r20, %r18, %pm;
+    mul.lo.u32      %r27, %r15, %r27;
+    mad.lo.u32      %r27, %r14, %r5, %r27;
+    add.u32         %r27, %r27, %r12;
+    ld.param.u64    %rd6, [pout];
+    mul.wide.u32    %rd7, %r27, %r30;
+    add.u64         %rd6, %rd6, %rd7;
+    @%pb cvt.rn.bf16.f32 %h, %f1;
+    @%pb st.global.b16 [%rd6], %h;
+    @!%pb st.global.f32 [%rd6], %f1;
+done:
+    ret;
+}
+
+// dS = P * (dP - D), D = sum_j P dP (which is also dy . y). in place over dP, one
+// thread per row
+.visible .entry att_ds(
+    .param .u64 pp,
+    .param .u64 pdp,
+    .param .u32 pn,
+    .param .u32 pt)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<12>;
+    .reg .b64   %rd<12>;
+    .reg .f32   %f<8>;
+
+    ld.param.u32    %r1, [pn];
+    ld.param.u32    %r2, [pt];
+    mov.u32         %r4, %ctaid.x;
+    mov.u32         %r5, %ntid.x;
+    mov.u32         %r6, %tid.x;
+    mad.lo.u32      %r7, %r4, %r5, %r6;
+    setp.ge.u32     %p, %r7, %r1;
+    @%p bra         done;
+    mul.lo.u32      %r8, %r7, %r2;
+    mul.wide.u32    %rd1, %r8, 4;
+    ld.param.u64    %rd2, [pp];
+    add.u64         %rd2, %rd2, %rd1;
+    ld.param.u64    %rd3, [pdp];
+    add.u64         %rd3, %rd3, %rd1;
+    mov.f32         %f1, 0f00000000;
+    mov.u32         %r9, 0;
+    mov.u64         %rd4, %rd2;
+    mov.u64         %rd5, %rd3;
+dl:
+    setp.ge.u32     %p, %r9, %r2;
+    @%p bra         dd;
+    ld.global.f32   %f2, [%rd4];
+    ld.global.f32   %f3, [%rd5];
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    add.u64         %rd4, %rd4, 4;
+    add.u64         %rd5, %rd5, 4;
+    add.u32         %r9, %r9, 1;
+    bra             dl;
+dd:
+    mov.u32         %r9, 0;
+wl:
+    setp.ge.u32     %p, %r9, %r2;
+    @%p bra         done;
+    ld.global.f32   %f2, [%rd2];
+    ld.global.f32   %f3, [%rd3];
+    sub.f32         %f3, %f3, %f1;
+    mul.f32         %f3, %f3, %f2;
+    st.global.f32   [%rd3], %f3;
+    add.u64         %rd2, %rd2, 4;
+    add.u64         %rd3, %rd3, 4;
+    add.u32         %r9, %r9, 1;
+    bra             wl;
+done:
+    ret;
+}
+
+// dk and dv, one thread per number. each kv head collects from all the query heads
+// that read it, and from every query at or after its position:
+//   dk[b,j,kvh][d] = scale sum_h sum_t dS[b,h,t,j] q[b,t,h][d]
+//   dv[b,j,kvh][d] =       sum_h sum_t  P[b,h,t,j] dy[b,t,h][d]
+.visible .entry att_dkv(
+    .param .u64 pp,
+    .param .u64 pds,
+    .param .u64 pqkv,
+    .param .u64 pdy,
+    .param .u64 pdqkv,
+    .param .u32 pb,
+    .param .u32 pt,
+    .param .u32 ph,
+    .param .u32 pkvh,
+    .param .u32 phd,
+    .param .u32 pbf,
+    .param .f32 pscale)
+{
+    .reg .pred  %p, %pb;
+    .reg .b32   %r<48>;
+    .reg .b64   %rd<24>;
+    .reg .f32   %f<12>;
+    .reg .b16   %h;
+
+    ld.param.u32    %r1, [pb];
+    ld.param.u32    %r2, [pt];
+    ld.param.u32    %r3, [ph];
+    ld.param.u32    %r4, [pkvh];
+    ld.param.u32    %r5, [phd];
+    ld.param.u32    %r6, [pbf];
+    setp.ne.u32     %pb, %r6, 0;
+    selp.u32        %r40, 2, 4, %pb;
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %ntid.x;
+    mov.u32         %r9, %tid.x;
+    mad.lo.u32      %r10, %r7, %r8, %r9;
+    mul.lo.u32      %r11, %r1, %r2;
+    mul.lo.u32      %r11, %r11, %r4;
+    mul.lo.u32      %r11, %r11, %r5;
+    setp.ge.u32     %p, %r10, %r11;
+    @%p bra         done;
+    rem.u32         %r12, %r10, %r5;            // d
+    div.u32         %r13, %r10, %r5;
+    rem.u32         %r14, %r13, %r4;            // kv head
+    div.u32         %r15, %r13, %r4;            // m = b*T + j
+    div.u32         %r16, %r15, %r2;            // b
+    rem.u32         %r17, %r15, %r2;            // j
+    mul.lo.u32      %r18, %r3, %r5;             // QD
+    mul.lo.u32      %r19, %r4, %r5;             // KVD
+    shl.b32         %r20, %r19, 1;
+    add.u32         %r20, %r20, %r18;           // QKV
+    div.u32         %r21, %r3, %r4;             // group
+    ld.param.u64    %rd1, [pp];
+    ld.param.u64    %rd2, [pds];
+    ld.param.u64    %rd3, [pqkv];
+    ld.param.u64    %rd4, [pdy];
+    mul.wide.u32    %rd5, %r20, %r40;           // qkv row bytes
+    mul.wide.u32    %rd6, %r18, %r40;           // dy row bytes
+    mul.wide.u32    %rd7, %r2, 4;               // one score row
+    mov.f32         %f1, 0f00000000;            // dk
+    mov.f32         %f2, 0f00000000;            // dv
+    mov.u32         %r22, 0;                    // hh
+hl:
+    setp.ge.u32     %p, %r22, %r21;
+    @%p bra         hd;
+    mad.lo.u32      %r23, %r14, %r21, %r22;     // query head
+    // P/dS at [b][h][j][j], then down the column
+    mad.lo.u32      %r24, %r16, %r3, %r23;
+    mad.lo.u32      %r24, %r24, %r2, %r17;
+    mad.lo.u32      %r24, %r24, %r2, %r17;
+    mul.wide.u32    %rd8, %r24, 4;
+    add.u64         %rd9, %rd1, %rd8;
+    add.u64         %rd10, %rd2, %rd8;
+    // q[b, j, h][d] and dy[b, j, h][d]
+    mad.lo.u32      %r25, %r16, %r2, %r17;
+    mul.lo.u32      %r26, %r25, %r20;
+    mad.lo.u32      %r26, %r23, %r5, %r26;
+    add.u32         %r26, %r26, %r12;
+    mul.wide.u32    %rd11, %r26, %r40;
+    add.u64         %rd11, %rd3, %rd11;
+    mul.lo.u32      %r27, %r25, %r18;
+    mad.lo.u32      %r27, %r23, %r5, %r27;
+    add.u32         %r27, %r27, %r12;
+    mul.wide.u32    %rd12, %r27, %r40;
+    add.u64         %rd12, %rd4, %rd12;
+    mov.u32         %r28, %r17;                 // t
+tl:
+    setp.ge.u32     %p, %r28, %r2;
+    @%p bra         td;
+    ld.global.f32   %f3, [%rd9];                // P
+    ld.global.f32   %f4, [%rd10];               // dS
+    @%pb ld.global.u16 %r29, [%rd11];
+    @%pb ld.global.u16 %r30, [%rd12];
+    @%pb shl.b32    %r29, %r29, 16;
+    @%pb shl.b32    %r30, %r30, 16;
+    @%pb mov.b32    %f5, %r29;
+    @%pb mov.b32    %f6, %r30;
+    @!%pb ld.global.f32 %f5, [%rd11];           // q
+    @!%pb ld.global.f32 %f6, [%rd12];           // dy
+    fma.rn.f32      %f1, %f4, %f5, %f1;
+    fma.rn.f32      %f2, %f3, %f6, %f2;
+    add.u64         %rd9, %rd9, %rd7;
+    add.u64         %rd10, %rd10, %rd7;
+    add.u64         %rd11, %rd11, %rd5;
+    add.u64         %rd12, %rd12, %rd6;
+    add.u32         %r28, %r28, 1;
+    bra             tl;
+td:
+    add.u32         %r22, %r22, 1;
+    bra             hl;
+hd:
+    ld.param.f32    %f7, [pscale];
+    mul.f32         %f1, %f1, %f7;
+    mul.lo.u32      %r31, %r15, %r20;
+    add.u32         %r31, %r31, %r18;
+    mad.lo.u32      %r31, %r14, %r5, %r31;
+    add.u32         %r31, %r31, %r12;           // dk index
+    ld.param.u64    %rd13, [pdqkv];
+    mul.wide.u32    %rd14, %r31, %r40;
+    add.u64         %rd14, %rd13, %rd14;
+    mul.wide.u32    %rd15, %r19, %r40;
+    add.u64         %rd15, %rd14, %rd15;        // dv, KVD further along
+    @%pb cvt.rn.bf16.f32 %h, %f1;
+    @%pb st.global.b16 [%rd14], %h;
+    @%pb cvt.rn.bf16.f32 %h, %f2;
+    @%pb st.global.b16 [%rd15], %h;
+    @!%pb st.global.f32 [%rd14], %f1;
+    @!%pb st.global.f32 [%rd15], %f2;
+done:
+    ret;
+}

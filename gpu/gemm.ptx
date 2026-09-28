@@ -406,3 +406,107 @@ ready:
     st.global.v2.f32 [%rd17+96], {%f62, %f63};
     ret;
 }
+
+// the general reference matmul, what the model's naive path uses and what every
+// fast matmul mode gets checked against. C = R + A B^T where
+//   A(m,k) = A[m][k], or A[k][m] with flag 1
+//   B(n,k) = B[n][k], or B[k][n] with flag 2
+//   C is f32, or bf16 with flag 4. A and B are bf16, or f32 with flag 8.
+//   R (f32, same shape as C) is optional, it can be C itself to accumulate
+// one thread per output, plain fma in k order. block 16x16, grid (N/16, M/16) rounded up
+.visible .entry mm_ref(
+    .param .u64 pa,
+    .param .u64 pw,
+    .param .u64 pc,
+    .param .u64 pr,
+    .param .u32 pm,
+    .param .u32 pn,
+    .param .u32 pk,
+    .param .u32 pf)
+{
+    .reg .pred  %p, %pf, %pbf;
+    .reg .b32   %r<24>;
+    .reg .b64   %rd<16>;
+    .reg .f32   %f<8>;
+    .reg .b16   %h;
+
+    ld.param.u32    %r1, [pm];
+    ld.param.u32    %r2, [pn];
+    ld.param.u32    %r3, [pk];
+    ld.param.u32    %r4, [pf];
+    mov.u32         %r5, %ctaid.x;
+    mov.u32         %r6, %tid.x;
+    mad.lo.u32      %r7, %r5, 16, %r6;          // n
+    mov.u32         %r5, %ctaid.y;
+    mov.u32         %r6, %tid.y;
+    mad.lo.u32      %r8, %r5, 16, %r6;          // m
+    setp.ge.u32     %p, %r7, %r2;
+    @%p bra         done;
+    setp.ge.u32     %p, %r8, %r1;
+    @%p bra         done;
+    and.b32         %r9, %r4, 8;
+    setp.ne.u32     %pf, %r9, 0;
+    selp.u32        %r10, 4, 2, %pf;            // input element size
+    and.b32         %r9, %r4, 4;
+    setp.ne.u32     %pbf, %r9, 0;
+    // A: start m*K step 1, or start m step M
+    and.b32         %r9, %r4, 1;
+    setp.ne.u32     %p, %r9, 0;
+    mul.lo.u32      %r11, %r8, %r3;
+    selp.u32        %r11, %r8, %r11, %p;
+    selp.u32        %r12, %r1, 1, %p;
+    // B: start n*K step 1, or start n step N
+    and.b32         %r9, %r4, 2;
+    setp.ne.u32     %p, %r9, 0;
+    mul.lo.u32      %r13, %r7, %r3;
+    selp.u32        %r13, %r7, %r13, %p;
+    selp.u32        %r14, %r2, 1, %p;
+    ld.param.u64    %rd1, [pa];
+    mul.wide.u32    %rd2, %r11, %r10;
+    add.u64         %rd1, %rd1, %rd2;
+    mul.wide.u32    %rd3, %r12, %r10;           // A step in bytes
+    ld.param.u64    %rd4, [pw];
+    mul.wide.u32    %rd5, %r13, %r10;
+    add.u64         %rd4, %rd4, %rd5;
+    mul.wide.u32    %rd6, %r14, %r10;
+    mov.f32         %f1, 0f00000000;
+    mov.u32         %r15, 0;
+kloop:
+    setp.ge.u32     %p, %r15, %r3;
+    @%p bra         kdone;
+    @%pf ld.global.f32 %f2, [%rd1];
+    @%pf ld.global.f32 %f3, [%rd4];
+    @!%pf ld.global.u16 %r16, [%rd1];
+    @!%pf ld.global.u16 %r17, [%rd4];
+    @!%pf shl.b32   %r16, %r16, 16;
+    @!%pf shl.b32   %r17, %r17, 16;
+    @!%pf mov.b32   %f2, %r16;
+    @!%pf mov.b32   %f3, %r17;
+    fma.rn.f32      %f1, %f2, %f3, %f1;
+    add.u64         %rd1, %rd1, %rd3;
+    add.u64         %rd4, %rd4, %rd6;
+    add.u32         %r15, %r15, 1;
+    bra             kloop;
+kdone:
+    mad.lo.u32      %r18, %r8, %r2, %r7;        // m*N + n
+    mul.wide.u32    %rd7, %r18, 4;
+    ld.param.u64    %rd8, [pr];
+    setp.eq.u64     %p, %rd8, 0;
+    @%p bra         store;
+    add.u64         %rd8, %rd8, %rd7;
+    ld.global.f32   %f4, [%rd8];
+    add.f32         %f1, %f4, %f1;
+store:
+    ld.param.u64    %rd9, [pc];
+    @%pbf bra       store16;
+    add.u64         %rd9, %rd9, %rd7;
+    st.global.f32   [%rd9], %f1;
+    bra             done;
+store16:
+    mul.wide.u32    %rd10, %r18, 2;
+    add.u64         %rd9, %rd9, %rd10;
+    cvt.rn.bf16.f32 %h, %f1;
+    st.global.b16   [%rd9], %h;
+done:
+    ret;
+}

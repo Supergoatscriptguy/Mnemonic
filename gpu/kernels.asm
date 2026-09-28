@@ -15,3 +15,5 @@ global %1, %1_end
 ptx ptx_basic, "gpu/basic.ptx"
 ptx ptx_gemm, "gpu/gemm.ptx"
 ptx ptx_bench, "gpu/bench.ptx"
+ptx ptx_ops, "model/ops.ptx"
+ptx ptx_attn, "model/attn.ptx"
