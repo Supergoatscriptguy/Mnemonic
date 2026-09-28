@@ -5,6 +5,7 @@ bits 64
 
 extern GetStdHandle, WriteFile, GetConsoleMode, SetConsoleMode
 extern GetConsoleOutputCP, SetConsoleOutputCP, GetLastError, ExitProcess
+extern AddVectoredExceptionHandler, GetModuleHandleA
 
 section .bss
 con_out  resq 1
@@ -23,8 +24,83 @@ lib_init:
     call time_init
     call cpu_detect
     call args_init
+    mov ecx, 1
+    lea rdx, [crashed]
+    call AddVectoredExceptionHandler
     add rsp, 40
     ret
+
+; last stop for faults (access violation, divide by zero, ...): print where it
+; happened as an offset into the exe (find it in bin\name.map), plus the registers
+crashed:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    mov rsi, [rcx]              ; EXCEPTION_RECORD
+    mov rdi, [rcx+8]            ; CONTEXT
+    mov eax, [rsi]
+    and eax, 0xf0000000
+    cmp eax, 0xc0000000
+    jne .pass                   ; only errors, not debugger/breakpoint chatter
+    ; and only in our own code. system dlls sometimes fault on purpose and
+    ; catch it themselves, that's none of our business
+    xor ecx, ecx
+    call GetModuleHandleA
+    mov rbx, [rsi+16]
+    sub rbx, rax                ; offset into the exe
+    mov edx, [rax+0x3c]         ; PE header
+    mov edx, [rax+rdx+0x50]     ; SizeOfImage
+    cmp rbx, rdx
+    jae .pass
+    call con_restore
+    say 13, 10, "crash: code 0x"
+    mov ecx, [rsi]
+    mov edx, 8
+    call print_hex
+    say " at exe+0x"
+    mov rcx, rbx
+    mov edx, 8
+    call print_hex
+    cmp dword [rsi], 0xc0000005
+    jne .regs
+    say ", touching 0x"
+    mov rcx, [rsi+40]
+    mov edx, 16
+    call print_hex
+.regs:
+    say 13, 10
+    lea rbx, [regnames]
+    mov esi, 0x78               ; CONTEXT.Rax, the 16 gprs follow in order
+.reg:
+    mov rcx, rbx
+    mov edx, 5
+    call print
+    mov rcx, [rdi+rsi]
+    mov edx, 16
+    call print_hex
+    add rbx, 5
+    add esi, 8
+    lea eax, [esi-0x78]
+    test eax, 31
+    jnz .reg
+    say 13, 10
+    cmp esi, 0xf8
+    jb .reg
+    mov ecx, 3
+    call ExitProcess
+.pass:
+    xor eax, eax                ; EXCEPTION_CONTINUE_SEARCH
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+section .rdata
+regnames db " rax ", " rcx ", " rdx ", " rbx ", " rsp ", " rbp ", " rsi ", " rdi "
+         db "  r8 ", "  r9 ", " r10 ", " r11 ", " r12 ", " r13 ", " r14 ", " r15 "
+section .text
 
 global con_init
 con_init:

@@ -23,9 +23,21 @@ for %%f in (lib\*.asm) do (
     set OBJS=!OBJS! build\lib\%%~nf.obj
 )
 
+rem anything else it needs is listed in the source:
+rem   ; uses: data\parquet data\zstd      (modules)
+rem   ; libs: winhttp.lib                 (extra import libs)
+set USES=
+set LIBS=
+for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; uses:" "%SRC%"') do set USES=%%b
+for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; libs:" "%SRC%"') do set LIBS=%%b
+for %%m in (%USES%) do (
+    %ASM% -o build\%%~nm.obj %%m.asm || goto fail
+    set OBJS=!OBJS! build\%%~nm.obj
+)
+
 %ASM% -o build\%NAME%.obj "%SRC%" || goto fail
-"%LINKER%" /nologo /subsystem:console /entry:start /nodefaultlib /debug /incremental:no ^
-    /out:bin\%NAME%.exe build\%NAME%.obj %OBJS% kernel32.lib /libpath:"%SDKLIB%" || goto fail
+"%LINKER%" /nologo /subsystem:console /entry:start /nodefaultlib /debug /incremental:no /map ^
+    /out:bin\%NAME%.exe build\%NAME%.obj %OBJS% kernel32.lib %LIBS% /libpath:"%SDKLIB%" || goto fail
 
 echo built bin\%NAME%.exe
 popd
