@@ -39,6 +39,8 @@ echo == gpu
 bin\gpu.exe || set BAD=1
 echo == gradients
 bin\grad.exe || set BAD=1
+echo == fast kernels vs naive
+bin\model.exe || set BAD=1
 
 :done
 echo.
