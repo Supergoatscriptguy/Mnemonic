@@ -687,10 +687,37 @@ done:
     ret;
 }
 
+// (m1, s1), (m2, s2) -> (M, s1 2^(m1-M) + s2 2^(m2-M)), M = max. two empty ones
+// (-inf) stay empty. two separate products and one add, so swapping the pairs
+// gives the same bits (an fma wouldn't)
+.func (.reg .f32 %om, .reg .f32 %os) comb(.reg .f32 %m1, .reg .f32 %s1, .reg .f32 %m2, .reg .f32 %s2)
+{
+    .reg .pred  %p;
+    .reg .f32   %a, %b;
+
+    max.f32         %om, %m1, %m2;
+    mov.f32         %os, 0f00000000;
+    setp.eq.f32     %p, %om, 0fFF800000;
+    @%p bra         cdone;
+    sub.f32         %a, %m1, %om;
+    ex2.approx.f32  %a, %a;
+    mul.f32         %a, %a, %s1;
+    sub.f32         %b, %m2, %om;
+    ex2.approx.f32  %b, %b;
+    mul.f32         %b, %b, %s2;
+    add.f32         %os, %a, %b;
+cdone:
+    ret;
+}
+
 // cross-entropy, one block of 256 per row. loss[m] += logsumexp - logit[target],
 // and unless pflags & 2 the gradient goes to dl: (softmax - onehot) * scale.
 // pflags & 1: chat data, rows whose target lacks MASKBIT don't count.
-// the target of row m = b*T + t is token m + b + 1 (rows are T+1 tokens)
+// the target of row m = b*T + t is token m + b + 1 (rows are T+1 tokens).
+// one read for the logsumexp: every thread keeps a running max and a sum scaled to
+// it (log2 units), and pairs (m1, s1), (m2, s2) combine to
+// (M, s1 2^(m1 - M) + s2 2^(m2 - M)). that's symmetric, so the butterfly leaves
+// every lane with the same bits. a second read writes the gradient
 .visible .entry xent(
     .param .u64 pl,
     .param .u64 pdl,
@@ -702,7 +729,7 @@ done:
     .param .u32 pbf,
     .param .u32 pflags)
 {
-    .shared .align 16 .f32 red[8];
+    .shared .align 16 .f32 red[16];
     .reg .pred  %p, %pb, %pg, %pi;
     .reg .b32   %r<24>;
     .reg .b64   %rd<16>;
@@ -743,92 +770,75 @@ done:
     mov.u32         %r21, red;
     @%pi bra        ignore;
 
-    // max
+    // running max (f1) and sum (f2), both in log2 units
     mov.f32         %f1, 0fFF800000;
+    mov.f32         %f2, 0f00000000;
     mov.u32         %r15, %r7;
-mx:
-    setp.ge.u32     %p, %r15, %r2;
-    @%p bra         mxdone;
-    mul.wide.u32    %rd7, %r15, 4;
+    mul.wide.u32    %rd7, %r7, 4;
     add.u64         %rd7, %rd3, %rd7;
-    ld.global.f32   %f2, [%rd7];
-    max.f32         %f1, %f1, %f2;
+ms:
+    setp.ge.u32     %p, %r15, %r2;
+    @%p bra         msdone;
+    ld.global.f32   %f3, [%rd7];
+    mul.f32         %f3, %f3, 0f3FB8AA3B;       // log2(e)
+    setp.gt.f32     %p, %f3, %f1;
+    @%p sub.f32     %f4, %f1, %f3;              // new max: the sum so far shrinks
+    @%p ex2.approx.f32 %f4, %f4;
+    @%p fma.rn.f32  %f2, %f2, %f4, 0f3F800000;
+    @%p mov.f32     %f1, %f3;
+    @!%p sub.f32    %f4, %f3, %f1;
+    @!%p ex2.approx.f32 %f4, %f4;
+    @!%p add.f32    %f2, %f2, %f4;
+    add.u64         %rd7, %rd7, 1024;
     add.u32         %r15, %r15, 256;
-    bra             mx;
-mxdone:
-    shfl.sync.bfly.b32 %f2, %f1, 16, 31, 0xffffffff;
-    max.f32         %f1, %f1, %f2;
-    shfl.sync.bfly.b32 %f2, %f1, 8, 31, 0xffffffff;
-    max.f32         %f1, %f1, %f2;
-    shfl.sync.bfly.b32 %f2, %f1, 4, 31, 0xffffffff;
-    max.f32         %f1, %f1, %f2;
-    shfl.sync.bfly.b32 %f2, %f1, 2, 31, 0xffffffff;
-    max.f32         %f1, %f1, %f2;
-    shfl.sync.bfly.b32 %f2, %f1, 1, 31, 0xffffffff;
-    max.f32         %f1, %f1, %f2;
-    shl.b32         %r16, %r8, 2;
+    bra             ms;
+msdone:
+    shfl.sync.bfly.b32 %f5, %f1, 16, 31, 0xffffffff;
+    shfl.sync.bfly.b32 %f6, %f2, 16, 31, 0xffffffff;
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    shfl.sync.bfly.b32 %f5, %f1, 8, 31, 0xffffffff;
+    shfl.sync.bfly.b32 %f6, %f2, 8, 31, 0xffffffff;
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    shfl.sync.bfly.b32 %f5, %f1, 4, 31, 0xffffffff;
+    shfl.sync.bfly.b32 %f6, %f2, 4, 31, 0xffffffff;
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    shfl.sync.bfly.b32 %f5, %f1, 2, 31, 0xffffffff;
+    shfl.sync.bfly.b32 %f6, %f2, 2, 31, 0xffffffff;
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    shfl.sync.bfly.b32 %f5, %f1, 1, 31, 0xffffffff;
+    shfl.sync.bfly.b32 %f6, %f2, 1, 31, 0xffffffff;
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    // warp results to shared, then everyone folds the 8 of them in the same order
+    shl.b32         %r16, %r8, 3;
     add.u32         %r16, %r21, %r16;
     setp.eq.u32     %p, %r9, 0;
-    @%p st.shared.f32 [%r16], %f1;
+    @%p st.shared.v2.f32 [%r16], {%f1, %f2};
     bar.sync        0;
-    ld.shared.v4.f32 {%f3, %f4, %f5, %f6}, [%r21];
-    ld.shared.v4.f32 {%f7, %f8, %f9, %f10}, [%r21+16];
-    max.f32         %f1, %f3, %f4;
-    max.f32         %f1, %f1, %f5;
-    max.f32         %f1, %f1, %f6;
-    max.f32         %f1, %f1, %f7;
-    max.f32         %f1, %f1, %f8;
-    max.f32         %f1, %f1, %f9;
-    max.f32         %f1, %f1, %f10;             // row max, same in every thread
-    bar.sync        0;
-
-    // sum of exp(l - max)
-    mov.f32         %f11, 0f00000000;
-    mov.u32         %r15, %r7;
-se:
-    setp.ge.u32     %p, %r15, %r2;
-    @%p bra         sedone;
-    mul.wide.u32    %rd7, %r15, 4;
-    add.u64         %rd7, %rd3, %rd7;
-    ld.global.f32   %f2, [%rd7];
-    sub.f32         %f2, %f2, %f1;
-    mul.f32         %f2, %f2, 0f3FB8AA3B;       // log2(e)
-    ex2.approx.f32  %f2, %f2;
-    add.f32         %f11, %f11, %f2;
-    add.u32         %r15, %r15, 256;
-    bra             se;
-sedone:
-    shfl.sync.bfly.b32 %f2, %f11, 16, 31, 0xffffffff;
-    add.f32         %f11, %f11, %f2;
-    shfl.sync.bfly.b32 %f2, %f11, 8, 31, 0xffffffff;
-    add.f32         %f11, %f11, %f2;
-    shfl.sync.bfly.b32 %f2, %f11, 4, 31, 0xffffffff;
-    add.f32         %f11, %f11, %f2;
-    shfl.sync.bfly.b32 %f2, %f11, 2, 31, 0xffffffff;
-    add.f32         %f11, %f11, %f2;
-    shfl.sync.bfly.b32 %f2, %f11, 1, 31, 0xffffffff;
-    add.f32         %f11, %f11, %f2;
-    setp.eq.u32     %p, %r9, 0;
-    @%p st.shared.f32 [%r16], %f11;
-    bar.sync        0;
-    ld.shared.v4.f32 {%f3, %f4, %f5, %f6}, [%r21];
-    ld.shared.v4.f32 {%f7, %f8, %f9, %f10}, [%r21+16];
-    add.f32         %f11, %f3, %f4;
-    add.f32         %f11, %f11, %f5;
-    add.f32         %f11, %f11, %f6;
-    add.f32         %f11, %f11, %f7;
-    add.f32         %f11, %f11, %f8;
-    add.f32         %f11, %f11, %f9;
-    add.f32         %f11, %f11, %f10;
-    lg2.approx.f32  %f12, %f11;
-    fma.rn.f32      %f12, %f12, 0f3F317218, %f1; // lse = max + ln(sum)
+    ld.shared.v2.f32 {%f1, %f2}, [%r21];
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+8];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+16];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+24];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+32];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+40];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+48];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    ld.shared.v2.f32 {%f5, %f6}, [%r21+56];
+    call.uni        (%f1, %f2), comb, (%f1, %f2, %f5, %f6);
+    lg2.approx.f32  %f12, %f2;
+    add.f32         %f12, %f12, %f1;            // lse, log2 units
 
     setp.ne.u32     %p, %r7, 0;
     @%p bra         grad;
     mul.wide.u32    %rd8, %r11, 4;
     add.u64         %rd8, %rd3, %rd8;
     ld.global.f32   %f13, [%rd8];
-    sub.f32         %f13, %f12, %f13;
+    mul.f32         %f14, %f12, 0f3F317218;     // natural log
+    sub.f32         %f13, %f14, %f13;
     ld.param.u64    %rd9, [ploss];
     mul.wide.u32    %rd10, %r6, 4;
     add.u64         %rd9, %rd9, %rd10;
@@ -845,8 +855,8 @@ gl:
     mul.wide.u32    %rd7, %r15, 4;
     add.u64         %rd7, %rd3, %rd7;
     ld.global.f32   %f2, [%rd7];
-    sub.f32         %f2, %f2, %f12;
     mul.f32         %f2, %f2, 0f3FB8AA3B;
+    sub.f32         %f2, %f2, %f12;
     ex2.approx.f32  %f2, %f2;                   // softmax
     setp.eq.u32     %p, %r15, %r11;
     @%p sub.f32     %f2, %f2, 0f3F800000;
@@ -873,6 +883,57 @@ zl:
     @!%pb st.global.f32 [%rd11], %f2;
     add.u32         %r15, %r15, 256;
     bra             zl;
+done:
+    ret;
+}
+
+// sum partials in fixed order: C[i] = R[i] + P[0][i] + P[1][i] + ... (R optional,
+// it can be C). gemm_tc's split k lands in P, this puts it together
+.visible .entry splitsum(
+    .param .u64 pc,
+    .param .u64 pr,
+    .param .u64 pp,
+    .param .u32 pn,
+    .param .u32 ps)
+{
+    .reg .pred  %p, %pr;
+    .reg .b32   %r<12>;
+    .reg .b64   %rd<12>;
+    .reg .f32   %f<4>;
+
+    ld.param.u32    %r1, [pn];
+    ld.param.u32    %r2, [ps];
+    ld.param.u64    %rd1, [pc];
+    ld.param.u64    %rd2, [pr];
+    ld.param.u64    %rd3, [pp];
+    setp.ne.u64     %pr, %rd2, 0;
+    mul.wide.u32    %rd4, %r1, 4;               // one partial
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %ntid.x;
+    mov.u32         %r5, %tid.x;
+    mad.lo.u32      %r6, %r3, %r4, %r5;
+    mov.u32         %r7, %nctaid.x;
+    mul.lo.u32      %r7, %r7, %r4;
+loop:
+    setp.ge.u32     %p, %r6, %r1;
+    @%p bra         done;
+    mul.wide.u32    %rd5, %r6, 4;
+    mov.f32         %f1, 0f00000000;
+    add.u64         %rd6, %rd2, %rd5;
+    @%pr ld.global.f32 %f1, [%rd6];
+    add.u64         %rd7, %rd3, %rd5;
+    mov.u32         %r8, 0;
+sl:
+    ld.global.f32   %f2, [%rd7];
+    add.f32         %f1, %f1, %f2;
+    add.u64         %rd7, %rd7, %rd4;
+    add.u32         %r8, %r8, 1;
+    setp.lt.u32     %p, %r8, %r2;
+    @%p bra         sl;
+    add.u64         %rd8, %rd1, %rd5;
+    st.global.f32   [%rd8], %f1;
+    add.u32         %r6, %r6, %r7;
+    bra             loop;
 done:
     ret;
 }

@@ -15,7 +15,7 @@ bits 64
 %include "tokenizer/tok.inc"
 %include "train/train.inc"
 
-extern ExitProcess
+extern ExitProcess, SetThreadExecutionState
 
 MAXACC equ 1024
 SAMPT  equ 128                  ; samples run on one row this long
@@ -641,6 +641,9 @@ trainloop:
     push r12
     push r13
     sub rsp, 48
+    ; no sleeping while we train (ES_CONTINUOUS | ES_SYSTEM_REQUIRED), until we exit
+    mov ecx, 0x80000001
+    call SetThreadExecutionState
     mov rax, [total]
     mov [stats+PS_TOTAL], rax
     call gpu_meminfo

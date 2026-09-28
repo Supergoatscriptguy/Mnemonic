@@ -12,7 +12,7 @@ bits 64
 %include "model/model.inc"
 %include "test/check.inc"
 
-extern ptx_gemm, ptx_gemm_end, ptx_attn, ptx_attn_end
+extern ptx_gemm, ptx_gemm_end, ptx_attn, ptx_attn_end, ptx_ops, ptx_ops_end
 
 GM equ 640                      ; like a qkv weight gradient: 640 x 384, k over tokens
 GN equ 384
@@ -45,6 +45,8 @@ dbt     resq 1
 dr      resq 1
 dc      resq 1
 dd_     resq 1
+dpart   resq 1
+f_split resq 1
 
 section .text
 
@@ -417,6 +419,69 @@ t_gemm:
     jb .bf
     test ebx, ebx
     check z, "gemm_tc bf16 out = its f32 out rounded, bit for bit"
+
+    ; split k: 4 slices of the k tiles into partials, splitsum adds them and R
+    lea rcx, [ptx_ops]
+    lea rdx, [ptx_ops_end]
+    sub rdx, rcx
+    call gpu_module
+    mov rcx, rax
+    lea rdx, [kn_split]
+    call gpu_func
+    mov [f_split], rax
+    mov ecx, 4 * GM * GN * 4
+    call gpu_alloc
+    mov [dpart], rax
+    lea rbx, [kl]
+    mov rax, [f_tc]
+    mov [rbx+KL_FUNC], rax
+    mov rax, [dat]
+    mov [rbx+KL_ARGS], rax
+    mov rax, [dbt]
+    mov [rbx+KL_ARGS+8], rax
+    mov rax, [dpart]
+    mov [rbx+KL_ARGS+16], rax
+    mov qword [rbx+KL_ARGS+24], GM
+    mov qword [rbx+KL_ARGS+32], GN
+    mov qword [rbx+KL_ARGS+40], GK
+    mov qword [rbx+KL_ARGS+48], 0
+    mov qword [rbx+KL_ARGS+56], MM_TA | MM_TB
+    grid GN / 128, GM / 128, 256, 1
+    mov dword [rbx+KL_GZ], 4
+    mov rcx, rbx
+    call gpu_launch
+    mov rax, [f_split]
+    mov [rbx+KL_FUNC], rax
+    mov rax, [dc]
+    mov [rbx+KL_ARGS], rax
+    mov rax, [dr]
+    mov [rbx+KL_ARGS+8], rax
+    mov rax, [dpart]
+    mov [rbx+KL_ARGS+16], rax
+    mov qword [rbx+KL_ARGS+24], GM * GN
+    mov qword [rbx+KL_ARGS+32], 4
+    grid GM * GN / 256, 1, 256, 1
+    mov rcx, rbx
+    call gpu_launch
+    call gpu_sync
+    MMT f_ref, da, db_, dd_, [dr], 0
+    mov rcx, [hc]
+    mov rdx, [dc]
+    mov r8d, GM * GN * 4
+    call gpu_down
+    mov rcx, [hd]
+    mov rdx, [dd_]
+    mov r8d, GM * GN * 4
+    call gpu_down
+    mov ecx, GM * GN
+    call relerr
+    movsd [rsp+48], xmm0
+    comisd xmm0, [c_tol]
+    setb cl
+    movzx ecx, cl
+    lea rdx, [m_split]
+    movsd xmm2, [rsp+48]
+    call t_okf
     add rsp, 56
     pop rsi
     pop rbx
@@ -425,6 +490,8 @@ t_gemm:
 section .rdata
 m_nt db "gemm_tc 640x384x2048 matches mm_ref", 0
 m_r  db "gemm_tc with R (C = R + A B^T) matches mm_ref", 0
+m_split db "gemm_tc split k in 4 (dW layout) + splitsum with R matches mm_ref", 0
+kn_split db "splitsum", 0
 
 ; ---- flash attention against the naive kernels, same bf16 q, k, v and dy
 XB  equ 2

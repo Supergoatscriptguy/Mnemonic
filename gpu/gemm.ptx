@@ -160,8 +160,12 @@ store:
 //  - untransposed tiles are 128 rows of 32 k, padded to 40 (80 bytes), so the 8
 //    rows one ldmatrix reads start in 8 different 4-bank groups: no conflicts.
 //    transposed ones are 32 k-rows of 128, padded to 136 (272 bytes), same idea
+//  - split k: with grid z > 1, block z does its z-th share of the k tiles and
+//    writes an f32 partial to C + z*M*N (no R). for weight gradients, which have
+//    few output tiles but K = every token; splitsum adds the partials up
 // shared per stage: A (10240 bytes max) + B = 20480, two stages.
-// grid (N/128, M/128), block 256. needs M%128 == 0, N%128 == 0, K%32 == 0
+// grid (N/128, M/128, splits), block 256. needs M%128 == 0, N%128 == 0,
+// K%32 == 0 and (K/32) % splits == 0
 .visible .entry gemm_tc(
     .param .u64 pa,
     .param .u64 pw,
@@ -280,6 +284,24 @@ bcopyt:
     add.u32         %r18, %r18, 10240;
     add.u32         %r19, %r18, 4352;
 bcopyd:
+    // this block's share of the k tiles, and its own partial C when split
+    shr.u32         %r20, %r3, 5;               // k tiles
+    mov.u32         %r62, %nctaid.z;
+    div.u32         %r20, %r20, %r62;
+    mov.u32         %r63, %ctaid.z;
+    mul.lo.u32      %r64, %r20, %r63;           // first tile
+    cvt.u64.u32     %rd22, %r64;
+    mul.lo.u64      %rd23, %rd22, %rd20;
+    add.u64         %rd5, %rd5, %rd23;
+    add.u64         %rd7, %rd7, %rd23;
+    mul.lo.u64      %rd23, %rd22, %rd21;
+    add.u64         %rd8, %rd8, %rd23;
+    add.u64         %rd9, %rd9, %rd23;
+    mul.wide.u32    %rd23, %r1, %r2;
+    cvt.u64.u32     %rd22, %r63;
+    mul.lo.u64      %rd23, %rd23, %rd22;
+    shl.b64         %rd23, %rd23, 2;
+    add.u64         %rd3, %rd3, %rd23;
 
     // tile 0 into stage 0, then point at tile 1
     cp.async.cg.shared.global [%r16], [%rd5], 16;
@@ -435,7 +457,6 @@ initr:
     ld.global.v2.f32 {%f62, %f63}, [%rd17+96];
 
 kstart:
-    shr.u32         %r20, %r3, 5;               // k tiles
     mov.u32         %r21, 0;                    // this one
 kloop:
     // start the next tile into the other stage, if there is one

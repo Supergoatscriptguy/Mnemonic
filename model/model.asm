@@ -33,6 +33,7 @@ kn_swib    db "swiglu_bwd", 0
 kn_xent    db "xent", 0
 kn_adamw   db "adamw", 0
 kn_sumsq   db "sumsq", 0
+kn_split   db "splitsum", 0
 kn_attdot  db "att_dot", 0
 kn_attsm   db "att_softmax", 0
 kn_attmix  db "att_mix", 0
@@ -103,6 +104,7 @@ d_loss     resq 1               ; per row losses, summed over a step's micro-bat
 d_parts    resq 1
 d_sq       resq 1
 d_gn       resq 1               ; squared gradient norm
+d_split    resq 1               ; split-k partials
 d_rope     resq 1
 d_s1       resq 1               ; naive attention scratch, B*H*T*T f32 each
 d_s2       resq 1
@@ -123,6 +125,7 @@ k_swib     resq 1
 k_xent     resq 1
 k_adamw    resq 1
 k_sumsq    resq 1
+k_splitsum resq 1
 k_attdot   resq 1
 k_attsm    resq 1
 k_attmix   resq 1
@@ -199,7 +202,7 @@ rows8:
 
 ; the matmul whose args are in kl
 mm_go:
-    sub rsp, 40
+    sub rsp, 56                 ; C, R and the split count live at 32-48
     cmp dword [mdl_fast], 0
     jne .fast
     cmp qword [mdl+MD_ES], 4
@@ -216,7 +219,7 @@ mm_go:
     mov r8d, 16
     mov r9d, 16
     call launch
-    add rsp, 40
+    add rsp, 56
     ret
 .fast:
     KF mm_tc_f
@@ -224,10 +227,69 @@ mm_go:
     shr ecx, 7
     mov edx, [kl+KL_ARGS+24]
     shr edx, 7
+    ; a weight gradient (A transposed) with too few output tiles to fill the gpu
+    ; twice over splits its k (the tokens) into up to 8 slices
+    test dword [kl+KL_ARGS+56], MM_TA
+    jz .one
+    mov eax, ecx
+    imul eax, edx               ; tiles
+    mov r8d, [gpu_nsm]
+    add r8d, r8d
+    mov r9d, [kl+KL_ARGS+40]
+    shr r9d, 5                  ; k tiles
+    mov r10d, 1                 ; splits, a power of 2
+.more:
+    cmp r10d, 8
+    jae .split
+    mov r11d, eax
+    imul r11d, r10d
+    cmp r11d, r8d
+    jae .split
+    lea r11d, [r10d*2-1]
+    test r9d, r11d              ; twice as many still has to divide the k tiles
+    jnz .split
+    add r10d, r10d
+    jmp .more
+.split:
+    cmp r10d, 1
+    je .one
+    ; the partials go to d_split, then splitsum puts them together with R into C
+    mov rax, [kl+KL_ARGS+16]
+    mov [rsp+32], rax           ; C
+    mov rax, [kl+KL_ARGS+48]
+    mov [rsp+40], rax           ; R
+    mov rax, [d_split]
+    mov [kl+KL_ARGS+16], rax
+    mov qword [kl+KL_ARGS+48], 0
+    mov [rsp+48], r10
+    mov [kl+KL_GX], ecx
+    mov [kl+KL_GY], edx
+    mov [kl+KL_GZ], r10d
+    mov dword [kl+KL_BX], 256
+    mov dword [kl+KL_BY], 1
+    mov dword [kl+KL_BZ], 1
+    lea rcx, [kl]
+    call gpu_launch
+    mov rcx, [kl+KL_ARGS+24]
+    imul rcx, [kl+KL_ARGS+32]   ; M*N
+    KF k_splitsum
+    karg 0, [rsp+32]
+    karg 1, [rsp+40]
+    karg 2, [d_split]
+    mov [kl+KL_ARGS+24], rcx
+    karg 4, [rsp+48]
+    cmp ecx, 1 << 20
+    jbe .lin
+    mov ecx, 1 << 20            ; it strides over the rest
+.lin:
+    call lin
+    add rsp, 56
+    ret
+.one:
     mov r8d, 256
     mov r9d, 1
     call launch
-    add rsp, 40
+    add rsp, 56
     ret
 
 ; reads the model's shape from the config (cfg_load/cfg_args first)
@@ -285,7 +347,8 @@ section .rdata
 align 8
 fl_ops  dq kn_embed, k_embed, kn_embedb, k_embedb, kn_rms, k_rms, kn_rmsb, k_rmsb
         dq kn_rmsdw, k_rmsdw, kn_colsum, k_colsum, kn_rope, k_rope, kn_swi, k_swi
-        dq kn_swib, k_swib, kn_xent, k_xent, kn_adamw, k_adamw, kn_sumsq, k_sumsq, 0
+        dq kn_swib, k_swib, kn_xent, k_xent, kn_adamw, k_adamw, kn_sumsq, k_sumsq
+        dq kn_split, k_splitsum, 0
 fl_attn dq kn_attdot, k_attdot, kn_attsm, k_attsm, kn_attmix, k_attmix
         dq kn_attds, k_attds, kn_attdkv, k_attdkv
         dq kn_ffwd, k_ffwd, kn_attnd, k_attnd, kn_fdq, k_fdq, kn_fdkv, k_fdkv, 0
@@ -570,6 +633,11 @@ model_setup:
     shl rcx, 2
     call dalloc
     mov [d_attd], rax
+    ; split k only happens under two waves of 128x128 tiles, 8 slices at most
+    mov ecx, [gpu_nsm]
+    imul ecx, 2 * 8 * 128 * 128 * 4
+    call dalloc
+    mov [d_split], rax
     mov rcx, [mdl+MD_T]
     imul rcx, [mdl+MD_HD]
     shl rcx, 2                  ; T * hd/2 * (cos, sin) f32
