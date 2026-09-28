@@ -4,3 +4,4 @@ datasets/
 checkpoints/
 logs/
 scratch/
+cache/

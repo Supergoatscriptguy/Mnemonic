@@ -1,0 +1,157 @@
+// basic kernels: vector add, a 16 byte copy, f32 -> bf16, a busy loop, an empty one.
+// no .version/.target here, gpu_module puts those on for the gpu we're running on
+
+// c[i] = a[i] + b[i], grid-stride
+.visible .entry vadd(
+    .param .u64 pa,
+    .param .u64 pb,
+    .param .u64 pc,
+    .param .u32 pn)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<4>;
+
+    ld.param.u64    %rd1, [pa];
+    ld.param.u64    %rd2, [pb];
+    ld.param.u64    %rd3, [pc];
+    ld.param.u32    %r1, [pn];
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mov.u32         %r4, %tid.x;
+    mad.lo.u32      %r5, %r2, %r3, %r4;
+    mov.u32         %r6, %nctaid.x;
+    mul.lo.u32      %r6, %r6, %r3;
+loop:
+    setp.ge.u32     %p, %r5, %r1;
+    @%p bra         done;
+    mul.wide.u32    %rd4, %r5, 4;
+    add.u64         %rd5, %rd1, %rd4;
+    ld.global.f32   %f1, [%rd5];
+    add.u64         %rd5, %rd2, %rd4;
+    ld.global.f32   %f2, [%rd5];
+    add.f32         %f3, %f1, %f2;
+    add.u64         %rd5, %rd3, %rd4;
+    st.global.f32   [%rd5], %f3;
+    add.u32         %r5, %r5, %r6;
+    bra             loop;
+done:
+    ret;
+}
+
+// dst = src, 16 bytes per thread per step, grid-stride. n counts 16 byte chunks
+.visible .entry copy16(
+    .param .u64 pd,
+    .param .u64 ps,
+    .param .u64 pn)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<10>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64    %rd1, [pd];
+    ld.param.u64    %rd2, [ps];
+    ld.param.u64    %rd3, [pn];
+    mov.u32         %r1, %ctaid.x;
+    mov.u32         %r2, %ntid.x;
+    mov.u32         %r3, %tid.x;
+    cvt.u64.u32     %rd5, %r3;
+    mad.wide.u32    %rd4, %r1, %r2, %rd5;
+    mov.u32         %r4, %nctaid.x;
+    mul.wide.u32    %rd6, %r4, %r2;
+loop:
+    setp.ge.u64     %p, %rd4, %rd3;
+    @%p bra         done;
+    shl.b64         %rd7, %rd4, 4;
+    add.u64         %rd8, %rd2, %rd7;
+    ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd8];
+    add.u64         %rd9, %rd1, %rd7;
+    st.global.v4.u32 [%rd9], {%r5, %r6, %r7, %r8};
+    add.u64         %rd4, %rd4, %rd6;
+    bra             loop;
+done:
+    ret;
+}
+
+// dst[i] = bf16(src[i]), rounded to nearest even
+.visible .entry f2bf(
+    .param .u64 pd,
+    .param .u64 ps,
+    .param .u32 pn)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f1;
+    .reg .b16   %h1;
+
+    ld.param.u64    %rd1, [pd];
+    ld.param.u64    %rd2, [ps];
+    ld.param.u32    %r1, [pn];
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mov.u32         %r4, %tid.x;
+    mad.lo.u32      %r5, %r2, %r3, %r4;
+    mov.u32         %r6, %nctaid.x;
+    mul.lo.u32      %r6, %r6, %r3;
+loop:
+    setp.ge.u32     %p, %r5, %r1;
+    @%p bra         done;
+    mul.wide.u32    %rd3, %r5, 4;
+    add.u64         %rd4, %rd2, %rd3;
+    ld.global.f32   %f1, [%rd4];
+    cvt.rn.bf16.f32 %h1, %f1;
+    mul.wide.u32    %rd3, %r5, 2;
+    add.u64         %rd4, %rd1, %rd3;
+    st.global.b16   [%rd4], %h1;
+    add.u32         %r5, %r5, %r6;
+    bra             loop;
+done:
+    ret;
+}
+
+// keeps the alus busy: 4 independent fma chains per thread, iters rounds.
+// one float per thread comes out so none of it gets optimized away
+.visible .entry busy(
+    .param .u64 pd,
+    .param .u32 piters)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<4>;
+    .reg .f32   %f<8>;
+
+    ld.param.u64    %rd1, [pd];
+    ld.param.u32    %r1, [piters];
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mov.u32         %r4, %tid.x;
+    mad.lo.u32      %r5, %r2, %r3, %r4;
+    cvt.rn.f32.u32  %f0, %r5;
+    add.f32         %f1, %f0, 0f3F800000;
+    add.f32         %f2, %f0, 0f40000000;
+    add.f32         %f3, %f0, 0f40400000;
+    mov.u32         %r6, 0;
+loop:
+    fma.rn.f32      %f0, %f0, 0f3F7FF972, 0f38D1B717;
+    fma.rn.f32      %f1, %f1, 0f3F7FF972, 0f38D1B717;
+    fma.rn.f32      %f2, %f2, 0f3F7FF972, 0f38D1B717;
+    fma.rn.f32      %f3, %f3, 0f3F7FF972, 0f38D1B717;
+    add.u32         %r6, %r6, 1;
+    setp.lt.u32     %p, %r6, %r1;
+    @%p bra         loop;
+    add.f32         %f4, %f0, %f1;
+    add.f32         %f5, %f2, %f3;
+    add.f32         %f6, %f4, %f5;
+    mul.wide.u32    %rd2, %r5, 4;
+    add.u64         %rd3, %rd1, %rd2;
+    st.global.f32   [%rd3], %f6;
+    ret;
+}
+
+// nothing at all, for timing launches
+.visible .entry empty()
+{
+    ret;
+}
