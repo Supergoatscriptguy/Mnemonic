@@ -1400,7 +1400,7 @@ pick:
     push rsi
     push rdi
     push r12
-    sub rsp, 40
+    sub rsp, 56
     mov rsi, [hlog]
     xor ebx, ebx                ; how many kept
     xor ecx, ecx
@@ -1441,16 +1441,20 @@ pick:
     inc rcx
     jmp .v
 .kept:
-    ; p_i = exp((v_i - v_0) / temp), in place
+    ; p_i = exp((v_i - v_0) / temp), in place. v_0 gets a copy first: the loop
+    ; overwrites topv[0] on its first pass (that was a real bug, every sample so
+    ; far avoided the model's top choice)
     xorpd xmm0, xmm0
     movsd [rsp+32], xmm0        ; sum
+    movsd xmm0, [topv]
+    movsd [rsp+40], xmm0        ; the max
     xor edi, edi
 .p:
     cmp rdi, rbx
     jae .draw
     lea rax, [topv]
     movsd xmm0, [rax+rdi*8]
-    subsd xmm0, [rax]
+    subsd xmm0, [rsp+40]
     divsd xmm0, [temp]
     call math_exp
     lea rax, [topv]
@@ -1478,7 +1482,7 @@ pick:
 .got:
     lea rax, [topi]
     mov rax, [rax+rdi*8]
-    add rsp, 40
+    add rsp, 56
     pop r12
     pop rdi
     pop rsi

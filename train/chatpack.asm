@@ -1,11 +1,15 @@
-; chatpack out.tok in.tok [in.tok*3 ...] [ctx=1024] [seed=1]
+; chatpack out.tok in.tok [in.tok*3 ...] [+in.tok ...] [ctx=1024] [seed=1]
 ; chat .tok files -> one file for fine-tuning. the conversations (each input
 ; repeated *N times) get shuffled and packed into blocks of exactly ctx tokens:
 ; every block starts at a conversation and none crosses into the next block, the
 ; leftover room is <|bos|> padding that's never a target. the trainer reads rows
 ; of ctx+1 tokens with a stride of ctx, so each row is one block, and no row
 ; starts in the middle of a conversation. longer conversations keep their first
-; ctx tokens
+; ctx tokens.
+; +in.tok: its conversations only ever go first in a block, with nothing before
+; them. for small sets repeated many times (the identity set): packed together,
+; a conversation can see its twins earlier in the block and the model learns to
+; copy the answer from there instead of knowing it
 ; uses: tokenizer\tok tokenizer\pretok
 default rel
 bits 64
@@ -19,14 +23,15 @@ MAXCV  equ 4 << 20              ; conversations, repeats included
 WINDOW equ 256                  ; how far ahead to look for one that fits
 CHUNK  equ 32 << 20             ; output buffer
 
-; a conversation: pointer to its tokens, token count
+; a conversation: pointer to its tokens, token count (bit 62: goes first in a block)
 CV_PTR equ 0
 CV_LEN equ 8
+FIRST  equ 1 << 62
 
 section .rdata
 k_ctx    db "ctx", 0
 k_seed   db "seed", 0
-e_usage  db "usage: chatpack out.tok in.tok [in.tok*N ...] [ctx=1024] [seed=1]", 0
+e_usage  db "usage: chatpack out.tok in.tok [in.tok*N ...] [+in.tok ...] [ctx=1024] [seed=1]", 0
 e_open   db "can't map ", 0
 e_chat   db "not a chat .tok file: ", 0
 e_hash   db "the inputs were made with different tokenizers", 0
@@ -55,6 +60,8 @@ rng      resb RNG_SIZE
 hdr      resb TF_SIZE
 files    resq MAXIN
 reps     resq MAXIN
+flags    resq MAXIN
+curflag  resq 1
 nfiles   resq 1
 outname  resq 1
 padbuf   resq 1                 ; ctx tokens of padding
@@ -90,7 +97,15 @@ start:
 .input:
     cmp ebx, MAXIN
     jae .nexta
-    ; path*N: N copies
+    ; +path: first in a block. path*N: N copies
+    lea rax, [flags]
+    mov qword [rax+rbx*8], 0
+    cmp byte [rdi], '+'
+    jne .plain
+    mov rcx, FIRST
+    mov [rax+rbx*8], rcx
+    inc rdi
+.plain:
     lea rax, [reps]
     mov qword [rax+rbx*8], 1
     mov rcx, rdi
@@ -154,6 +169,9 @@ start:
     mov rcx, [rax+rsi*8]
     lea rax, [reps]
     mov rdx, [rax+rsi*8]
+    lea rax, [flags]
+    mov rax, [rax+rsi*8]
+    mov [curflag], rax
     call gather
     inc rsi
     jmp .in
@@ -264,6 +282,7 @@ addcv:
     mov rdx, [ctx]              ; keep the first ctx tokens
     inc qword [ntrunc]
 .fits:
+    or rdx, [curflag]
     mov [rax+CV_LEN], rdx
     inc qword [ncv]
     ret
@@ -329,6 +348,11 @@ pack:
     mov rax, rcx
     shl rax, 4
     mov rdx, [rsi+rax+CV_LEN]
+    btr rdx, 62                 ; a + conversation only goes into an empty block
+    jnc .len
+    test r12, r12
+    jnz .skip
+.len:
     lea r14, [r12+rdx]
     cmp r14, [ctx]
     ja .skip
@@ -472,6 +496,7 @@ write:
     add rax, [cv]
     mov rcx, [rax+CV_PTR]
     mov rdx, [rax+CV_LEN]
+    btr rdx, 62
     add r12, rdx
     ; count the targets on the way
     xor r8d, r8d
