@@ -1,7 +1,7 @@
 ; shared declarations, %include in anything that uses lib/
 
 ; console.asm
-extern lib_init, con_init, con_restore, con_tty, con_out
+extern lib_init, con_init, con_restore, con_tty, con_out, con_readline, con_intty
 extern print, print_z, print_dec, print_int, print_hex, print_fixed, print_sci, fatal
 ; fmt.asm
 extern fmt_str, fmt_dec, fmt_dec0, fmt_int, fmt_hex, fmt_fixed, fmt_sci, fmt_count, fmt_hms

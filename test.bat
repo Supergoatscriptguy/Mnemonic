@@ -4,7 +4,7 @@ rem builds every test program and every tool, then runs the self-checking tests
 pushd "%~dp0"
 set BAD=0
 
-for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu grad model) do (
+for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu grad model infer) do (
     call .\build.bat test\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 rem the tools too, so nothing rots unnoticed
@@ -20,6 +20,9 @@ for %%t in (gpuinfo gpubench) do (
 call .\build.bat train\train >nul || (echo build failed: train& set BAD=1)
 call .\build.bat train\chatpack >nul || (echo build failed: chatpack& set BAD=1)
 call .\build.bat test\resume >nul || (echo build failed: resume& set BAD=1)
+for %%t in (quantize chat) do (
+    call .\build.bat chat\%%t >nul || (echo build failed: %%t& set BAD=1)
+)
 if %BAD%==1 goto done
 
 bin\cpuinfo.exe
@@ -46,6 +49,8 @@ echo == fast kernels vs naive
 bin\model.exe || set BAD=1
 echo == stop and resume training
 bin\resume.exe || set BAD=1
+echo == cpu inference
+bin\infer.exe || set BAD=1
 
 :done
 echo.

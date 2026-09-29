@@ -6,6 +6,7 @@ bits 64
 extern GetStdHandle, WriteFile, GetConsoleMode, SetConsoleMode
 extern GetConsoleOutputCP, SetConsoleOutputCP, GetLastError, ExitProcess
 extern AddVectoredExceptionHandler, GetModuleHandleA
+extern ReadConsoleW, WideCharToMultiByte, ReadFile
 
 section .bss
 con_out  resq 1
@@ -13,6 +14,10 @@ con_tty  resd 1                 ; 1 if stdout is a real console, not a file or p
 oldmode  resd 1
 oldcp    resd 1
 written  resd 1
+global con_intty
+con_intty resd 1                ; stdin is a console
+con_in   resq 1
+wline    resw 4096
 
 section .text
 
@@ -191,6 +196,120 @@ printer print_int, fmt_int      ; rcx = signed
 printer print_hex, fmt_hex      ; rcx = value, edx = digits
 printer print_fixed, fmt_fixed  ; xmm0 = value, edx = decimals
 printer print_sci, fmt_sci      ; xmm0 = value, edx = decimals
+
+; rcx = buffer, rdx = its size. reads a line from stdin as utf-8, without the
+; line break. rax = bytes, or -1 at the end of input (ctrl+z on a console).
+; a console gets ReadConsoleW + a utf-16 -> utf-8 conversion, so non-ascii input
+; works; redirected input is read as bytes
+global con_readline
+con_readline:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub rsp, 72
+    mov rsi, rcx
+    mov r12, rdx
+    cmp qword [con_in], 0
+    jne .have
+    mov ecx, -10                ; STD_INPUT_HANDLE
+    call GetStdHandle
+    mov [con_in], rax
+    mov rcx, rax
+    lea rdx, [rsp+64]
+    call GetConsoleMode
+    mov [con_intty], eax
+.have:
+    cmp dword [con_intty], 0
+    je .bytes
+    mov rcx, [con_in]
+    lea rdx, [wline]
+    mov r8d, 4096
+    lea r9, [rsp+64]
+    mov qword [rsp+32], 0
+    call ReadConsoleW
+    test eax, eax
+    jz .eof
+    mov ecx, [rsp+64]           ; utf-16 units read
+    test ecx, ecx
+    jz .eof
+    lea rax, [wline]
+    cmp word [rax], 26          ; ctrl+z
+    je .eof
+    mov ecx, 65001              ; CP_UTF8
+    xor edx, edx
+    lea r8, [wline]
+    mov r9d, [rsp+64]
+    mov [rsp+32], rsi
+    mov [rsp+40], r12
+    mov qword [rsp+48], 0
+    mov qword [rsp+56], 0
+    call WideCharToMultiByte
+    mov rbx, rax
+    jmp .trim
+.bytes:
+    ; a byte at a time until the newline (it's only for piped input)
+    xor ebx, ebx
+.b:
+    cmp rbx, r12
+    jae .trim
+    mov rcx, [con_in]
+    lea rdx, [rsi+rbx]
+    mov r8d, 1
+    lea r9, [rsp+64]
+    mov qword [rsp+32], 0
+    call ReadFile
+    test eax, eax
+    jz .end
+    cmp dword [rsp+64], 0
+    je .end
+    cmp byte [rsi+rbx], 10
+    je .nl
+    inc rbx
+    jmp .b
+.end:
+    test rbx, rbx
+    jz .eof
+    jmp .trim
+.nl:
+    inc rbx
+    ; powershell puts a byte order mark in front of what it pipes
+    cmp rbx, 3
+    jb .trim
+    mov eax, [rsi]
+    and eax, 0xffffff
+    cmp eax, 0xbfbbef
+    jne .trim
+    sub rbx, 3
+    mov rcx, rbx
+    mov rdi, rsi
+    push rsi
+    add rsi, 3
+    rep movsb
+    pop rsi
+.trim:
+    test rbx, rbx
+    jz .done
+    mov al, [rsi+rbx-1]
+    cmp al, 10
+    je .cut
+    cmp al, 13
+    jne .done
+.cut:
+    dec rbx
+    jmp .trim
+.done:
+    mov rax, rbx
+    jmp .out
+.eof:
+    mov rax, -1
+.out:
+    add rsp, 72
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
 
 ; rcx = message. prints it with GetLastError and exits. never returns, so it can
 ; realign the stack and not care how it was reached
