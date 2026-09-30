@@ -23,6 +23,7 @@ call .\build.bat test\resume >nul || (echo build failed: resume& set BAD=1)
 for %%t in (quantize chat) do (
     call .\build.bat chat\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
+call .\build.bat site\engine >nul || (echo build failed: engine.wasm& set BAD=1)
 if %BAD%==1 goto done
 
 bin\cpuinfo.exe
@@ -51,6 +52,8 @@ echo == stop and resume training
 bin\resume.exe || set BAD=1
 echo == cpu inference
 bin\infer.exe || set BAD=1
+echo == the webassembly engine vs bin\chat
+node site\test.mjs threads=12 || set BAD=1
 
 :done
 echo.

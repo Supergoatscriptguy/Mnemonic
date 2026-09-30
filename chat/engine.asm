@@ -195,9 +195,11 @@ eng_load:
     buf EN_LOGITS, [eng+EN_V]
     buf EN_PROBS, [eng+EN_V]
     buf EN_TMP, [eng+EN_D]
-    mov rax, [eng+EN_H]
-    imul rax, [eng+EN_T]
-    add rax, 8                  ; exp8 may read past the last score
+    ; a row of scores per head, padded: exp8 reads and writes up to 7 past the
+    ; last one, which without the padding lands in the next head's row (another thread's)
+    mov rax, [eng+EN_T]
+    add rax, 8
+    imul rax, [eng+EN_H]
     mov r13, rax
     buf EN_ATT, r13
 
@@ -464,8 +466,9 @@ atthead:
     imul rsi, [eng+EN_HD]
     shl rsi, 2
     add rsi, [eng+EN_QKVB]      ; q
-    mov rdi, rbx
-    imul rdi, [eng+EN_T]
+    mov rdi, [eng+EN_T]
+    add rdi, 8
+    imul rdi, rbx
     shl rdi, 2
     add rdi, [eng+EN_ATT]       ; scores
     mov r15, [eng+EN_HD]

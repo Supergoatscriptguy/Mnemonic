@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mnemonic-126m-int8",
+    "name": "Mnemonic 126M",
+    "file": "mnemonic-q8.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-q8.mnm",
+    "bytes": 126508032,
+    "about": "16 layers, pretrained on 5B tokens of FineWeb-Edu, then tuned for chat on smol-smoltalk. int8 weights: the same quality as full precision at a quarter of the size."
+  },
+  {
+    "id": "mnemonic-126m-int4",
+    "name": "Mnemonic 126M, small download",
+    "file": "mnemonic-q4.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-q4.mnm",
+    "bytes": 78748672,
+    "about": "The same model with int4 weights. A 40% smaller download and a little faster, but noticeably less sharp."
+  }
+]
