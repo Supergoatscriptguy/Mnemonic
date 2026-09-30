@@ -4,8 +4,9 @@
 ; every block starts at a conversation and none crosses into the next block, the
 ; leftover room is <|bos|> padding that's never a target. the trainer reads rows
 ; of ctx+1 tokens with a stride of ctx, so each row is one block, and no row
-; starts in the middle of a conversation. longer conversations keep their first
-; ctx tokens.
+; starts in the middle of a conversation. longer conversations keep as many whole
+; turns as fit (so every reply the model learns from ends in <|end|>), and ones
+; whose first reply alone doesn't fit are left out.
 ; +in.tok: its conversations only ever go first in a block, with nothing before
 ; them. for small sets repeated many times (the identity set): packed together,
 ; a conversation can see its twins earlier in the block and the model learns to
@@ -20,7 +21,7 @@ extern ExitProcess
 
 MAXIN  equ 64
 MAXCV  equ 4 << 20              ; conversations, repeats included
-WINDOW equ 256                  ; how far ahead to look for one that fits
+WINDOW equ 1024                  ; how far ahead to look for one that fits
 CHUNK  equ 32 << 20             ; output buffer
 
 ; a conversation: pointer to its tokens, token count (bit 62: goes first in a block)
@@ -48,7 +49,8 @@ order    resq 1                 ; conversation indices, -1 ends a block
 ncv      resq 1
 nord     resq 1
 nblk     resq 1
-ntrunc   resq 1
+ncut     resq 1                 ; cut back to whole turns
+ndrop    resq 1                 ; first reply alone too long
 ctx      resq 1
 hash     resq 1
 content  resq 1                 ; real tokens (not padding)
@@ -271,17 +273,30 @@ addcv:
     lea rcx, [e_many]
     call fatal
 .room:
-    shl rax, 4
-    add rax, [cv]
-    lea rdx, [rdi+r14*2]
-    mov [rax+CV_PTR], rdx
     mov rdx, rcx
     sub rdx, r14
     cmp rdx, [ctx]
     jbe .fits
-    mov rdx, [ctx]              ; keep the first ctx tokens
-    inc qword [ntrunc]
+    ; too long: keep whole turns, up to the last assistant <|end|> that fits.
+    ; cut mid-reply, the model would learn that replies can just stop without one
+    mov rdx, [ctx]
+.back:
+    dec rdx
+    js .drop
+    lea r8, [r14+rdx]
+    cmp word [rdi+r8*2], TOK_END | MASKBIT
+    jne .back
+    inc rdx
+    inc qword [ncut]
+    jmp .fits
+.drop:
+    inc qword [ndrop]           ; even the first reply doesn't fit
+    ret
 .fits:
+    shl rax, 4
+    add rax, [cv]
+    lea r8, [rdi+r14*2]
+    mov [rax+CV_PTR], r8
     or rdx, [curflag]
     mov [rax+CV_LEN], rdx
     inc qword [ncv]
@@ -538,13 +553,16 @@ report:
     say "  "
     mov rcx, [ncv]
     call print_dec
-    say " conversations (with repeats), "
-    mov rcx, [ntrunc]
-    call print_dec
-    say " cut to "
+    say " conversations (with repeats). longer than "
     mov rcx, [ctx]
     call print_dec
-    say " tokens", 13, 10, "  "
+    say ": "
+    mov rcx, [ncut]
+    call print_dec
+    say " cut back to whole turns, "
+    mov rcx, [ndrop]
+    call print_dec
+    say " dropped", 13, 10, "  "
     mov rcx, [nblk]
     call print_dec
     say " blocks of "
