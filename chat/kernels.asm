@@ -44,6 +44,7 @@ section .bss
 alignb 64
 mv_xq    resb MAXCOLS           ; the vector, quantized
 mv_xs    resd MAXCOLS / 32      ; its group scales
+mv_xneg  resb MAXCOLS           ; -8 sum(x) per group, 8 lanes each (int4 only)
 mv_mx    resq 1
 mv_x     resq 1
 mv_y     resq 1
@@ -74,6 +75,24 @@ section .text
     vpsignb ymm14, ymm14, %2
     vpmaddubsw ymm14, ymm15, ymm14
     vpmaddwd %1, ymm14, ymm13
+%endif
+%endmacro
+
+; the int4 version: %2 holds the stored nibbles, 0..15, unsigned. q - 8 is what they
+; mean, and (q - 8).x = q.x - 8 sum(x), so the lanes start at mv_xneg's -8 sum(x)
+; (%4, per group and lane, made once per vector) and no sign trick is needed. the
+; lanes come out exactly as DOT's would
+%macro DOTU 5                   ; dst, nibbles, activations, -8 sum(x), path
+%if %5 == 2
+    vmovdqu %1, %4
+    {vex} vpdpbssd %1, %2, %3
+%elif %5 == 1
+    vmovdqu %1, %4
+    {vex} vpdpbusd %1, %2, %3
+%else
+    vpmaddubsw ymm14, %2, %3    ; 15 * 127 * 2 fits in 16 bits
+    vpmaddwd ymm14, ymm14, ymm13
+    vpaddd %1, ymm14, %4
 %endif
 %endmacro
 
@@ -108,20 +127,38 @@ mvq8_%1:
     add rdi, [rsi+MX_Q]
     lea r9, [mv_xq]
     lea r10, [mv_xs]
+    ; two groups a step into two sums, so the fmas don't wait on each other
     vxorps ymm0, ymm0, ymm0
+    vxorps ymm5, ymm5, ymm5
     mov rcx, r13
-    shr rcx, 5
+    shr rcx, 6
+    jz .odd
 .g:
+    vmovdqu ymm1, [rdi]
+    vmovdqu ymm6, [rdi+32]
+    DOT ymm2, ymm1, [r9], %1
+    DOT ymm7, ymm6, [r9+32], %1
+    vcvtdq2ps ymm2, ymm2
+    vcvtdq2ps ymm7, ymm7
+    vbroadcastss ymm3, [r10]
+    vbroadcastss ymm8, [r10+4]
+    vfmadd231ps ymm0, ymm2, ymm3
+    vfmadd231ps ymm5, ymm7, ymm8
+    add rdi, 64
+    add r9, 64
+    add r10, 8
+    dec rcx
+    jnz .g
+.odd:
+    test r13, 32
+    jz .sum
     vmovdqu ymm1, [rdi]
     DOT ymm2, ymm1, [r9], %1
     vcvtdq2ps ymm2, ymm2
     vbroadcastss ymm3, [r10]
     vfmadd231ps ymm0, ymm2, ymm3
-    add rdi, 32
-    add r9, 32
-    add r10, 4
-    dec rcx
-    jnz .g
+.sum:
+    vaddps ymm0, ymm0, ymm5
     HSUM
     mov rax, [rsi+MX_S]
     vmulss xmm0, xmm0, [rax+rbx*4]
@@ -140,8 +177,8 @@ mvq8_%1:
 %endmacro
 
 ; int4 weights, a scale per group: y = sum_g xs[g] ws[g] * (w_g . xq_g). the 16
-; packed bytes of a group unpack to 32 int8: low nibbles are weights 0-15, high
-; nibbles 16-31, minus the 8 they were stored with
+; packed bytes of a group unpack to 32 nibbles: low ones are weights 0-15, high ones
+; 16-31. they're stored + 8, DOTU takes that back out
 %macro MVQ4 1
 mvq4_%1:
     push rbx
@@ -155,7 +192,6 @@ mvq4_%1:
     mov r13, [rsi+MX_C]
     vmovdqu ymm13, [ones16]
     vmovdqu ymm12, [nib]
-    vmovdqu ymm11, [eights]
 .row:
     cmp rbx, r12
     jae .done
@@ -169,28 +205,55 @@ mvq4_%1:
     add r11, [rsi+MX_S]
     lea r9, [mv_xq]
     lea r10, [mv_xs]
+    lea rax, [mv_xneg]
     vxorps ymm0, ymm0, ymm0
+    vxorps ymm5, ymm5, ymm5
     mov rcx, r13
-    shr rcx, 5
+    shr rcx, 6
+    jz .odd
 .g:
     vmovdqu xmm1, [rdi]
+    vmovdqu xmm6, [rdi+16]
     vpsrlw xmm2, xmm1, 4
-    vpand xmm1, xmm1, xmm12
-    vpand xmm2, xmm2, xmm12
+    vpsrlw xmm7, xmm6, 4
     vinserti128 ymm1, ymm1, xmm2, 1
-    vpsubb ymm1, ymm1, ymm11
-    DOT ymm2, ymm1, [r9], %1
+    vinserti128 ymm6, ymm6, xmm7, 1
+    vpand ymm1, ymm1, ymm12
+    vpand ymm6, ymm6, ymm12
+    DOTU ymm2, ymm1, [r9], [rax], %1
+    DOTU ymm7, ymm6, [r9+32], [rax+32], %1
+    add rax, 64
+    vcvtdq2ps ymm2, ymm2
+    vcvtdq2ps ymm7, ymm7
+    vmovss xmm4, [r10]
+    vmulss xmm4, xmm4, [r11]
+    vbroadcastss ymm3, xmm4
+    vmovss xmm9, [r10+4]
+    vmulss xmm9, xmm9, [r11+4]
+    vbroadcastss ymm8, xmm9
+    vfmadd231ps ymm0, ymm2, ymm3
+    vfmadd231ps ymm5, ymm7, ymm8
+    add rdi, 32
+    add r9, 64
+    add r10, 8
+    add r11, 8
+    dec rcx
+    jnz .g
+.odd:
+    test r13, 32
+    jz .sum
+    vmovdqu xmm1, [rdi]
+    vpsrlw xmm2, xmm1, 4
+    vinserti128 ymm1, ymm1, xmm2, 1
+    vpand ymm1, ymm1, ymm12
+    DOTU ymm2, ymm1, [r9], [rax], %1
     vcvtdq2ps ymm2, ymm2
     vmovss xmm4, [r10]
     vmulss xmm4, xmm4, [r11]
     vbroadcastss ymm3, xmm4
     vfmadd231ps ymm0, ymm2, ymm3
-    add rdi, 16
-    add r9, 32
-    add r10, 4
-    add r11, 4
-    dec rcx
-    jnz .g
+.sum:
+    vaddps ymm0, ymm0, ymm5
     HSUM
     mov rax, [mv_y]
     vmovss [rax+rbx*4], xmm0
@@ -356,6 +419,7 @@ mv_run:
     mov rcx, [mvq8]
     cmp qword [rbx+MX_T], QT_Q8
     je .go
+    call xneg
     mov rcx, [mvq4]
 .go:
     ; chunks of rows: about 8 per thread, at least 4 rows each
@@ -373,6 +437,29 @@ mv_run:
     call par_for
     add rsp, 32
     pop rbx
+    ret
+
+; mv_xneg: -8 sum(x) for every group of mv_xq, split into the lanes a dot product
+; makes (lane i sums bytes 4i..4i+3). for DOTU
+xneg:
+    mov rcx, [mv_mx]
+    mov rcx, [rcx+MX_C]
+    shr rcx, 5
+    lea rdx, [mv_xq]
+    lea r8, [mv_xneg]
+    vmovdqu ymm1, [eights]
+    vmovdqu ymm2, [ones16]
+    vpxor ymm3, ymm3, ymm3
+.g:
+    vpmaddubsw ymm0, ymm1, [rdx]
+    vpmaddwd ymm0, ymm0, ymm2
+    vpsubd ymm0, ymm3, ymm0
+    vmovdqu [r8], ymm0
+    add rdx, 32
+    add r8, 32
+    dec rcx
+    jnz .g
+    vzeroupper
     ret
 
 ; ymm0 = e^ymm0, for 8 floats (relative error around 1e-7). uses ymm1-5

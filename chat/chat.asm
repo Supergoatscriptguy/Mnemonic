@@ -11,7 +11,7 @@ bits 64
 %include "tokenizer/tok.inc"
 %include "chat/model.inc"
 
-extern ExitProcess
+extern ExitProcess, GetActiveProcessorCount
 
 MAXLINE equ 16384
 
@@ -54,8 +54,20 @@ start:
     sub rsp, 40
     call lib_init
     call cfg_args
+    ; default: 3/4 of the cpus, at most 12. a token reads every weight once, so it's
+    ; memory bound: on the 265F 12 threads do 417 tok/s and all 20 only 212, since
+    ; spinning workers that get bumped off a core hold up their chunk
+    mov ecx, 0xffff             ; ALL_PROCESSOR_GROUPS
+    call GetActiveProcessorCount
+    lea edx, [eax+eax*2]
+    shr edx, 2
+    mov eax, 12
+    cmp edx, eax
+    cmova edx, eax
+    mov eax, 1
+    cmp edx, eax
+    cmovb edx, eax
     lea rcx, [k_thr]
-    xor edx, edx
     call cfg_int
     mov ecx, eax
     call pool_init

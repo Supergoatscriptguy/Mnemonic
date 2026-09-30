@@ -6,10 +6,12 @@ bits 64
 
 WORK  equ 1 << 30
 CHUNK equ 1 << 20
+LAT   equ 20000
 
 section .rdata
 align 8
 c_two  dq 2.0
+c_us   dq 50.0                  ; 1e6 / LAT
 
 section .bss
 alignb 8
@@ -152,4 +154,29 @@ start:
 .shown:
     say 13, 10
 
+    ; what a tiny job costs, start to finish. the chat engine does ~80 per token
+    call time_now
+    mov r12, rax
+    mov ebx, LAT
+.lat:
+    lea rcx, [nop_fn]
+    xor edx, edx
+    mov r8, [nthreads]
+    mov r9d, 1
+    call par_for
+    dec ebx
+    jnz .lat
+    mov rcx, r12
+    call time_since
+    mulsd xmm0, [c_us]
+    movapd xmm6, xmm0
+    say "  empty par_for: "
+    movapd xmm0, xmm6
+    mov edx, 2
+    call print_fixed
+    say " us", 13, 10
+
     jmp t_done
+
+nop_fn:
+    ret

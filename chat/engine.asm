@@ -95,6 +95,8 @@ eng_load:
     mov [eng+EN_KVH], rax
     mov rax, [r12+MF_HD]
     mov [eng+EN_HD], rax
+    cmp rax, 64                 ; attention keeps a head in 8 ymm registers
+    jne .bad
     mov rax, [r12+MF_F]
     mov [eng+EN_F], rax
     mov rax, [r12+MF_V]
@@ -432,6 +434,18 @@ rope:
 .done:
     ret
 
+; one key's score, not summed yet: %1 = q (ymm8-15) * the 64 floats at [%2]
+%macro KEY 2
+    vmulps %1, ymm8, [%2]
+    vfmadd231ps %1, ymm9, [%2+32]
+    vfmadd231ps %1, ymm10, [%2+64]
+    vfmadd231ps %1, ymm11, [%2+96]
+    vfmadd231ps %1, ymm12, [%2+128]
+    vfmadd231ps %1, ymm13, [%2+160]
+    vfmadd231ps %1, ymm14, [%2+192]
+    vfmadd231ps %1, ymm15, [%2+224]
+%endmacro
+
 ; par_for callback: heads [rdx, r8) of attention at layer cur_l, position cur_t
 atthead:
     push rbx
@@ -471,48 +485,72 @@ atthead:
     imul rdi, rbx
     shl rdi, 2
     add rdi, [eng+EN_ATT]       ; scores
-    mov r15, [eng+EN_HD]
-    shr r15, 3                  ; ymm per head vector
+    mov r15, [cur_t]
+    inc r15                     ; keys
 
-    ; scores s_j = q . k_j * scale, and their max
+    ; scores s_j = q . k_j * scale, and their max. heads are 64 wide (eng_load checks),
+    ; so q lives in ymm8-15 and four keys go at once: four fma chains side by side
+    ; instead of one waiting on itself
+    vmovups ymm8, [rsi]
+    vmovups ymm9, [rsi+32]
+    vmovups ymm10, [rsi+64]
+    vmovups ymm11, [rsi+96]
+    vmovups ymm12, [rsi+128]
+    vmovups ymm13, [rsi+160]
+    vmovups ymm14, [rsi+192]
+    vmovups ymm15, [rsi+224]
     mov r8, [eng+EN_KC]
     lea r8, [r8+r13*4]
     vbroadcastss xmm6, [scale]
     mov r9d, 0xff800000
-    vmovd xmm7, r9d             ; max
+    vmovd xmm7, r9d
+    vbroadcastss xmm7, xmm7     ; max, 4 lanes
     xor r10d, r10d
-.s:
-    cmp r10, [cur_t]
-    ja .sm
-    vxorps ymm0, ymm0, ymm0
-    xor r11d, r11d
-.sd:
-    vmovups ymm1, [rsi+r11*8]
-    vfmadd231ps ymm0, ymm1, [r8+r11*8]
-    add r11, 4
-    mov rax, r11
-    shr rax, 2
+.s4:
+    lea rax, [r10+4]
     cmp rax, r15
-    jb .sd
+    ja .s1
+    lea r9, [r8+r14*2]
+    KEY ymm0, r8
+    KEY ymm1, r8+r14
+    KEY ymm2, r9
+    KEY ymm3, r9+r14
+    vhaddps ymm0, ymm0, ymm1
+    vhaddps ymm2, ymm2, ymm3
+    vhaddps ymm0, ymm0, ymm2    ; lo half: keys 0-3 over dims 0-3 of each 8, hi: 4-7
     vextractf128 xmm1, ymm0, 1
     vaddps xmm0, xmm0, xmm1
-    vmovhlps xmm1, xmm1, xmm0
+    vmulps xmm0, xmm0, xmm6
+    vmovups [rdi+r10*4], xmm0
+    vmaxps xmm7, xmm7, xmm0
+    lea r8, [r8+r14*4]
+    add r10, 4
+    jmp .s4
+.s1:
+    cmp r10, r15
+    jae .sm
+    KEY ymm0, r8
+    vextractf128 xmm1, ymm0, 1
     vaddps xmm0, xmm0, xmm1
-    vshufps xmm1, xmm0, xmm0, 1
-    vaddss xmm0, xmm0, xmm1
+    vhaddps xmm0, xmm0, xmm0
+    vhaddps xmm0, xmm0, xmm0
     vmulss xmm0, xmm0, xmm6
     vmovss [rdi+r10*4], xmm0
     vmaxss xmm7, xmm7, xmm0
     add r8, r14
     inc r10
-    jmp .s
+    jmp .s1
 .sm:
+    vshufps xmm0, xmm7, xmm7, 0x4e
+    vmaxps xmm7, xmm7, xmm0
+    vshufps xmm0, xmm7, xmm7, 0xb1
+    vmaxps xmm7, xmm7, xmm0
     ; p_j = exp(s_j - max), 8 at a time. the extra lanes past t just go unused
     vbroadcastss ymm8, xmm7
     xor r10d, r10d
 .e:
-    cmp r10, [cur_t]
-    ja .es
+    cmp r10, r15
+    jae .es
     vmovups ymm0, [rdi+r10*4]
     vsubps ymm0, ymm0, ymm8
     call exp8
@@ -520,42 +558,76 @@ atthead:
     add r10, 8
     jmp .e
 .es:
-    vxorps xmm9, xmm9, xmm9     ; sum, in order
+    ; their sum, always in the same order: 8 lanes over the full blocks, the rest one by one
+    vxorps ymm9, ymm9, ymm9
     xor r10d, r10d
-.sum:
+.sv:
+    lea rax, [r10+8]
+    cmp rax, r15
+    ja .sf
+    vaddps ymm9, ymm9, [rdi+r10*4]
+    add r10, 8
+    jmp .sv
+.sf:
+    vextractf128 xmm0, ymm9, 1
+    vaddps xmm9, xmm9, xmm0
+    vhaddps xmm9, xmm9, xmm9
+    vhaddps xmm9, xmm9, xmm9
+.st:
+    cmp r10, r15
+    jae .sd
     vaddss xmm9, xmm9, [rdi+r10*4]
     inc r10
-    cmp r10, [cur_t]
-    jbe .sum
+    jmp .st
+.sd:
     vmovss xmm0, [c_one]
-    vdivss xmm9, xmm0, xmm9
-    ; y = sum_j p_j v_j / sum, one 8-float column block at a time
-    mov rax, rbx
-    imul rax, [eng+EN_HD]
-    shl rax, 2
-    add rax, [eng+EN_Y]
+    vdivss xmm6, xmm0, xmm9
+    ; y = sum_j p_j v_j / sum, one key at a time into all 64 outputs (ymm8-15)
     mov rdx, [eng+EN_VC]
     lea rdx, [rdx+r13*4]
-    xor r11d, r11d              ; column block
-.c:
-    vxorps ymm0, ymm0, ymm0
-    mov r8, rdx
+    vxorps ymm8, ymm8, ymm8
+    vxorps ymm9, ymm9, ymm9
+    vxorps ymm10, ymm10, ymm10
+    vxorps ymm11, ymm11, ymm11
+    vxorps ymm12, ymm12, ymm12
+    vxorps ymm13, ymm13, ymm13
+    vxorps ymm14, ymm14, ymm14
+    vxorps ymm15, ymm15, ymm15
     xor r10d, r10d
 .v:
-    vbroadcastss ymm1, [rdi+r10*4]
-    vfmadd231ps ymm0, ymm1, [r8+r11*8]
-    add r8, r14
+    vbroadcastss ymm0, [rdi+r10*4]
+    vfmadd231ps ymm8, ymm0, [rdx]
+    vfmadd231ps ymm9, ymm0, [rdx+32]
+    vfmadd231ps ymm10, ymm0, [rdx+64]
+    vfmadd231ps ymm11, ymm0, [rdx+96]
+    vfmadd231ps ymm12, ymm0, [rdx+128]
+    vfmadd231ps ymm13, ymm0, [rdx+160]
+    vfmadd231ps ymm14, ymm0, [rdx+192]
+    vfmadd231ps ymm15, ymm0, [rdx+224]
+    add rdx, r14
     inc r10
-    cmp r10, [cur_t]
-    jbe .v
-    vbroadcastss ymm1, xmm9
-    vmulps ymm0, ymm0, ymm1
-    vmovups [rax+r11*8], ymm0
-    add r11, 4
-    mov r9, r11
-    shr r9, 2
-    cmp r9, r15
-    jb .c
+    cmp r10, r15
+    jb .v
+    vbroadcastss ymm0, xmm6
+    mov rax, rbx
+    shl rax, 8                  ; 64 floats per head
+    add rax, [eng+EN_Y]
+    vmulps ymm8, ymm8, ymm0
+    vmovups [rax], ymm8
+    vmulps ymm9, ymm9, ymm0
+    vmovups [rax+32], ymm9
+    vmulps ymm10, ymm10, ymm0
+    vmovups [rax+64], ymm10
+    vmulps ymm11, ymm11, ymm0
+    vmovups [rax+96], ymm11
+    vmulps ymm12, ymm12, ymm0
+    vmovups [rax+128], ymm12
+    vmulps ymm13, ymm13, ymm0
+    vmovups [rax+160], ymm13
+    vmulps ymm14, ymm14, ymm0
+    vmovups [rax+192], ymm14
+    vmulps ymm15, ymm15, ymm0
+    vmovups [rax+224], ymm15
     inc rbx
     jmp .h
 .done:
