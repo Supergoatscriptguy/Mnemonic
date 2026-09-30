@@ -1,0 +1,5 @@
+TEMPLATE """{{- range .Messages }}<|{{ .Role }}|>{{ .Content }}<|end|>{{ end }}<|assistant|>"""
+PARAMETER stop <|end|>
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 64
