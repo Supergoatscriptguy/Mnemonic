@@ -5,6 +5,7 @@ extern gpu_alloc, gpu_free, gpu_up, gpu_down, gpu_host, gpu_meminfo
 extern gpu_tstart, gpu_tstop, gpu_verbose
 extern gpu_name, gpu_ccmaj, gpu_ccmin, gpu_nsm, gpu_vram, gpu_drv, gpu_dev, gpu_attr
 extern gpu_ptxver, gpu_target
+extern gpu_fname, gpu_prof_begin, gpu_prof_end, gpu_prof, prof_n, prof_fn, prof_arg, prof_ms
 
 ; the driver's functions, filled in by gpu_init. call them through CU
 extern cuInit, cuDriverGetVersion, cuDeviceGet, cuDeviceGetCount, cuDeviceGetName

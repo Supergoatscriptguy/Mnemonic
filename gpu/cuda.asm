@@ -9,6 +9,8 @@ bits 64
 extern LoadLibraryA, GetProcAddress, SetEnvironmentVariableA, GetFullPathNameA, ExitProcess
 
 LOGSZ equ 16384
+MAXP  equ 8192                  ; launches one profile can hold
+MAXFN equ 256
 
 ; what we call a function, and what nvcuda.dll exports it as
 %macro FUNCS 0
@@ -70,6 +72,7 @@ e_nodev   db "no cuda devices", 0
 e_old     db "this needs compute capability 8.0 or newer (bf16 tensor cores)", 0
 m_missing db "nvcuda.dll doesn't have ", 0
 m_fail    db 13, 10, "cuda: ", 0
+s_unknown db "?", 0
 m_jit     db "ptx jit (its line numbers are 4 more than in the .ptx file, the header's in front):", 13, 10, 0
 
 ; ptx targets we know, newest first: compute capability, target name, ptx isa version
@@ -115,6 +118,18 @@ gpu_name    resb 256
 gpu_ptxver  resb 8
 gpu_target  resb 8
 cachepath   resb 1024
+; the profiler
+global gpu_prof, prof_n, prof_fn, prof_arg, prof_ms
+gpu_prof    resd 1              ; 1 = recording
+prof_n      resq 1
+evmade      resq 1
+prof_ev     resq MAXP + 1
+prof_fn     resq MAXP
+prof_arg    resq MAXP * 4       ; per launch: args 3, 4, 5, and 7 | grid z << 32
+prof_ms     resd MAXP
+fn_n        resq 1
+fn_h        resq MAXFN          ; every kernel loaded, and its name
+fn_name     resq MAXFN
 jitopt      resd 8
 jitval      resq 8
 errlog      resb LOGSZ
@@ -390,16 +405,106 @@ gpu_module:
     pop rbx
     ret
 
-; rcx = module, rdx = kernel name. rax = CUfunction
+; rcx = module, rdx = kernel name (kept, not copied). rax = CUfunction
 global gpu_func
 gpu_func:
-    sub rsp, 40
+    push rbx
+    sub rsp, 48
+    mov rbx, rdx
     mov r8, rdx
     mov rdx, rcx
     lea rcx, [rsp+32]
     CU cuModuleGetFunction
     mov rax, [rsp+32]
-    add rsp, 40
+    ; its name, for the profiler
+    mov rcx, [fn_n]
+    cmp rcx, MAXFN
+    jae .done
+    lea rdx, [fn_h]
+    mov [rdx+rcx*8], rax
+    lea rdx, [fn_name]
+    mov [rdx+rcx*8], rbx
+    inc qword [fn_n]
+.done:
+    add rsp, 48
+    pop rbx
+    ret
+
+; rcx = CUfunction. rax = its kernel name
+global gpu_fname
+gpu_fname:
+    xor edx, edx
+.f:
+    cmp rdx, [fn_n]
+    jae .none
+    lea rax, [fn_h]
+    cmp [rax+rdx*8], rcx
+    je .hit
+    inc rdx
+    jmp .f
+.hit:
+    lea rax, [fn_name]
+    mov rax, [rax+rdx*8]
+    ret
+.none:
+    lea rax, [s_unknown]
+    ret
+
+; profiling: between gpu_prof_begin and gpu_prof_end every launch gets an event
+; in front of it, and the gaps between the events are the kernels' gpu times.
+; everything has to go on one stream for that to add up
+global gpu_prof_begin
+gpu_prof_begin:
+    push rbx
+    sub rsp, 32
+.make:
+    mov rbx, [evmade]           ; made once, and one more than launches for the end
+    cmp rbx, MAXP + 1
+    jae .ready
+    lea rcx, [prof_ev]
+    lea rcx, [rcx+rbx*8]
+    xor edx, edx
+    CU cuEventCreate
+    inc qword [evmade]
+    jmp .make
+.ready:
+    mov qword [prof_n], 0
+    mov dword [gpu_prof], 1
+    add rsp, 32
+    pop rbx
+    ret
+
+; rcx = stream. stops recording, waits, and fills prof_ms. rax = launches recorded
+global gpu_prof_end
+gpu_prof_end:
+    push rbx
+    sub rsp, 32
+    mov dword [gpu_prof], 0
+    mov rdx, rcx
+    mov rax, [prof_n]
+    lea rcx, [prof_ev]
+    mov rcx, [rcx+rax*8]
+    CU cuEventRecord
+    mov rax, [prof_n]
+    lea rcx, [prof_ev]
+    mov rcx, [rcx+rax*8]
+    CU cuEventSynchronize
+    xor ebx, ebx
+.t:
+    cmp rbx, [prof_n]
+    jae .done
+    lea rcx, [prof_ms]
+    lea rcx, [rcx+rbx*4]
+    lea rax, [prof_ev]
+    mov rdx, [rax+rbx*8]
+    mov r8, [rax+rbx*8+8]
+    CU cuEventElapsedTime
+    inc rbx
+    jmp .t
+.done:
+    mov rax, [prof_n]
+    add rsp, 32
+    pop rbx
     ret
 
 ; rcx = launch (KL_*). points the driver at the argument values and launches
@@ -408,6 +513,9 @@ gpu_launch:
     push rbx
     sub rsp, 96
     mov rbx, rcx
+    cmp dword [gpu_prof], 0
+    jne .prof
+.go:
     lea rax, [rbx+KL_ARGS]
     lea rdx, [rbx+KL_PTRS]
     mov ecx, 16
@@ -438,6 +546,36 @@ gpu_launch:
     add rsp, 96
     pop rbx
     ret
+.prof:
+    ; the event, then what was launched: the kernel, and args 3, 4, 5, 7 plus grid z,
+    ; which for a matmul are M, N, K, flags and the split
+    mov rax, [prof_n]
+    cmp rax, MAXP
+    jae .go
+    lea rcx, [prof_ev]
+    mov rcx, [rcx+rax*8]
+    mov rdx, [rbx+KL_STREAM]
+    CU cuEventRecord
+    mov rax, [prof_n]
+    lea rcx, [prof_fn]
+    mov rdx, [rbx+KL_FUNC]
+    mov [rcx+rax*8], rdx
+    shl rax, 5
+    lea rcx, [prof_arg]
+    add rcx, rax
+    mov rdx, [rbx+KL_ARGS+3*8]
+    mov [rcx], rdx
+    mov rdx, [rbx+KL_ARGS+4*8]
+    mov [rcx+8], rdx
+    mov rdx, [rbx+KL_ARGS+5*8]
+    mov [rcx+16], rdx
+    mov edx, [rbx+KL_GZ]
+    shl rdx, 32
+    mov r8d, [rbx+KL_ARGS+7*8]
+    or rdx, r8
+    mov [rcx+24], rdx
+    inc qword [prof_n]
+    jmp .go
 
 ; waits for everything queued on the gpu
 global gpu_sync
