@@ -14,7 +14,7 @@ extern cuCtxSynchronize, cuMemGetInfo, cuMemAlloc, cuMemFree, cuMemAllocHost, cu
 extern cuMemcpyHtoD, cuMemcpyDtoH, cuMemcpyDtoD, cuMemcpyHtoDAsync, cuMemcpyDtoHAsync
 extern cuMemsetD32, cuModuleLoadDataEx, cuModuleGetFunction, cuModuleUnload, cuLaunchKernel
 extern cuFuncGetAttribute, cuFuncSetAttribute, cuStreamCreate, cuStreamSynchronize
-extern cuStreamDestroy, cuEventCreate, cuEventRecord, cuEventSynchronize, cuEventElapsedTime
+extern cuStreamDestroy, cuStreamWaitEvent, cuEventCreate, cuEventRecord, cuEventSynchronize, cuEventElapsedTime
 extern cuEventDestroy, cuGetErrorName, cuGetErrorString, cuOccupancy
 
 ; call a driver function, and if it doesn't return CUDA_SUCCESS die with its

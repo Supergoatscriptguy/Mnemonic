@@ -44,6 +44,7 @@ MAXFN equ 256
     F cuStreamCreate,           cuStreamCreate
     F cuStreamSynchronize,      cuStreamSynchronize
     F cuStreamDestroy,          cuStreamDestroy_v2
+    F cuStreamWaitEvent,        cuStreamWaitEvent
     F cuEventCreate,            cuEventCreate
     F cuEventRecord,            cuEventRecord
     F cuEventSynchronize,       cuEventSynchronize

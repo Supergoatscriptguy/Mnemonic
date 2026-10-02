@@ -56,6 +56,7 @@ ck_vocab   db "vocab", 0
 ck_ctx     db "ctx", 0
 ck_micro   db "micro", 0
 ck_rope    db "rope_base", 0
+ck_streams db "streams", 0
 e_heads    db "n_head has to be a multiple of n_kv_head, and d_model of n_head", 0
 e_fast     db "the fast kernels need head dim 64, ctx a multiple of 64, and d_model, ffn, vocab, heads*64 and micro*ctx multiples of 128", 0
 
@@ -69,10 +70,18 @@ c_onef     dd 1.0
 
 section .bss
 alignb 8
-global mdl, mdl_fast, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
+global mdl, mdl_fast, mdl_streams, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
 global k_f2bf, mm_ref_f, mm_tc_f
 mdl        resb MD_SIZE
 mdl_fast   resd 1
+mdl_streams resd 1              ; 2 = weight gradients on a second stream in the backward
+s2         resq 1               ; that stream
+ev_fork    resq 1               ; stream 0 up to here, for s2 to wait on
+ev_drest   resq 1               ; after the last s2 op that reads drest, dh, dxn, dqkv
+ev_dh      resq 1
+ev_dxn     resq 1
+ev_dqkv    resq 1
+ev_end     resq 1
 mdl_bf     resd 1               ; 1 if activations are bf16
 mmbf       resq 1               ; MM_BF, or 0 when activations are f32
 mmbftb     resq 1               ; same plus MM_TB
@@ -315,6 +324,10 @@ model_config:
     movsd xmm1, [c_rope]
     call cfg_float
     movsd [mdl+MD_ROPE], xmm0
+    lea rcx, [ck_streams]
+    mov edx, 1
+    call cfg_int
+    mov [mdl_streams], eax
     add rsp, 40
     ret
 
@@ -732,6 +745,21 @@ model_setup:
 .eop:
     mov [e_op], rax
 
+    ; the second stream (non-blocking, so it doesn't sync with stream 0 behind our
+    ; back) and its events. cheap, so always, whether streams=2 or not
+    lea rcx, [s2]
+    mov edx, 1                  ; CU_STREAM_NON_BLOCKING
+    CU cuStreamCreate
+    lea rbx, [ev_fork]
+.ev:
+    mov rcx, rbx
+    mov edx, 2                  ; CU_EVENT_DISABLE_TIMING
+    CU cuEventCreate
+    add rbx, 8
+    lea rax, [ev_end]
+    cmp rbx, rax
+    jbe .ev
+
     call rope_table
     add rsp, 48
     pop r15
@@ -1040,8 +1068,75 @@ rmsnorm:
     add rsp, 40
     ret
 
+; streams=2: in the backward the weight gradients (dW = dy^T x and the norm weights')
+; go on a second stream, beside the chain that carries dx down the layers. they only
+; read, and the scratch buffers they read (drest, dh, dxn, dqkv) get rewritten by
+; stream 0 a bit later, so each read ends with an event, and stream 0 waits on it
+; before it writes that buffer again. with streams=1 all of these do nothing and the
+; launches are exactly what they always were.
+;   fork: s2 waits for what stream 0 has queued so far (call it right after the producer)
+;   on2: launches go to s2 from here    back: rcx = event to record on s2, then stream 0
+;   waitfor: rcx = event, stream 0 waits on it    join: stream 0 waits for all of s2
+fork:
+    cmp dword [mdl_streams], 2
+    jne .no
+    sub rsp, 40
+    mov rcx, [ev_fork]
+    xor edx, edx
+    CU cuEventRecord
+    mov rcx, [s2]
+    mov rdx, [ev_fork]
+    xor r8d, r8d
+    CU cuStreamWaitEvent
+    add rsp, 40
+.no:
+    ret
+
+on2:
+    cmp dword [mdl_streams], 2
+    jne .no
+    mov rax, [s2]
+    mov [kl+KL_STREAM], rax
+.no:
+    ret
+
+back:
+    cmp dword [mdl_streams], 2
+    jne .no
+    sub rsp, 40
+    mov rcx, [rcx]
+    mov rdx, [s2]
+    CU cuEventRecord
+    mov qword [kl+KL_STREAM], 0
+    add rsp, 40
+.no:
+    ret
+
+waitfor:
+    cmp dword [mdl_streams], 2
+    jne .no
+    sub rsp, 40
+    mov rdx, [rcx]
+    xor ecx, ecx
+    xor r8d, r8d
+    CU cuStreamWaitEvent
+    add rsp, 40
+.no:
+    ret
+
+join:
+    sub rsp, 40
+    lea rcx, [ev_end]
+    call back
+    lea rcx, [ev_end]
+    call waitfor
+    add rsp, 40
+    ret
+
 ; rcx = dy (dxn), rdx = x, r8 = rstd, r9 = w, [rsp+40] = the weight's gradient,
-; [rsp+48] = add into dres (0 for the first one). updates dres and drest
+; [rsp+48] = add into dres (0 for the first one). updates dres and drest.
+; with streams=2 the caller has forked already and made sure drest is free, and the
+; weight gradient goes on s2
 rmsnorm_bwd:
     push rbx
     sub rsp, 32
@@ -1062,6 +1157,7 @@ rmsnorm_bwd:
     call rows8
     ; weight gradient: partial sums per row chunk, then add them up.
     ; dy, x, rstd are already in args 0-2
+    call on2
     KF k_rmsdw
     karg 3, [d_parts]
     karg 4, [cur_m]
@@ -1080,6 +1176,8 @@ rmsnorm_bwd:
     karg 3, NCH
     mov rcx, [mdl+MD_D]
     call lin
+    lea rcx, [ev_dxn]
+    call back
     add rsp, 32
     pop rbx
     ret
@@ -1427,9 +1525,18 @@ model_bwd:
     mov r14, [mdl+MD_F]
     add r14, r14                ; 2F
 
-    ; logits = xnf E^T
+    ; logits = xnf E^T. dE only needs dlogits, from the forward
+    call fork
+    lea rcx, [ev_dxn]
+    call waitfor
     MM [d_dlogits], [e_op], [d_dxn], 0, [cur_m], [mdl+MD_D], [mdl+MD_V], MM_TB
+    call on2
     MM [d_dlogits], [rsi+LP_XN1], r12, r12, [mdl+MD_V], [mdl+MD_D], [cur_m], MM_TA|MM_TB
+    lea rcx, [ev_end]
+    call back
+    call fork
+    lea rcx, [ev_drest]
+    call waitfor
     mov rax, [rsi+LP_GN1]
     mov [rsp+32], rax
     mov qword [rsp+40], 0
@@ -1445,8 +1552,14 @@ model_bwd:
     dec r13
     js .embed
     ; mlp: x' = x2 + swiglu(norm(x2) W13^T) W2^T
+    call fork
     MM [d_drest], [rsi+LP_W2], [d_dg], 0, [cur_m], [mdl+MD_F], [mdl+MD_D], [mmbftb]
+    call on2
     MM [d_drest], [rsi+LP_G], [rsi+LP_G2], [rsi+LP_G2], [mdl+MD_D], [mdl+MD_F], [cur_m], MM_TA|MM_TB
+    lea rcx, [ev_drest]
+    call back
+    lea rcx, [ev_dh]
+    call waitfor
     KF k_swib
     karg 0, [rsi+LP_H]
     karg 1, [d_dg]
@@ -1458,8 +1571,17 @@ model_bwd:
     mov rcx, [cur_m]
     imul rcx, [mdl+MD_F]
     call lin
+    call fork
+    lea rcx, [ev_dxn]
+    call waitfor
     MM [d_dh], [rsi+LP_W13], [d_dxn], 0, [cur_m], [mdl+MD_D], r14, MM_TB
+    call on2
     MM [d_dh], [rsi+LP_XN2], [rsi+LP_G13], [rsi+LP_G13], r14, [mdl+MD_D], [cur_m], MM_TA|MM_TB
+    lea rcx, [ev_dh]
+    call back
+    call fork
+    lea rcx, [ev_drest]
+    call waitfor
     mov rax, [rsi+LP_GN2]
     mov [rsp+32], rax
     mov qword [rsp+40], 1
@@ -1470,14 +1592,29 @@ model_bwd:
     call rmsnorm_bwd
 
     ; attention: x2 = x + attn(norm(x)) Wo^T
+    call fork
     MM [d_drest], [rsi+LP_WO], [d_dy], 0, [cur_m], [mdl+MD_QD], [mdl+MD_D], [mmbftb]
+    call on2
     MM [d_drest], [rsi+LP_Y], [rsi+LP_GO], [rsi+LP_GO], [mdl+MD_D], [mdl+MD_QD], [cur_m], MM_TA|MM_TB
+    lea rcx, [ev_drest]
+    call back
+    lea rcx, [ev_dqkv]
+    call waitfor
     call attn_bwd
     mov rcx, [d_dqkv]
     mov edx, 1
     call rope
+    call fork
+    lea rcx, [ev_dxn]
+    call waitfor
     MM [d_dqkv], [rsi+LP_WQKV], [d_dxn], 0, [cur_m], [mdl+MD_D], [mdl+MD_QKV], MM_TB
+    call on2
     MM [d_dqkv], [rsi+LP_XN1], [rsi+LP_GQKV], [rsi+LP_GQKV], [mdl+MD_QKV], [mdl+MD_D], [cur_m], MM_TA|MM_TB
+    lea rcx, [ev_dqkv]
+    call back
+    call fork
+    lea rcx, [ev_drest]
+    call waitfor
     mov rax, [rsi+LP_GN1]
     mov [rsp+32], rax
     mov qword [rsp+40], 1
@@ -1489,6 +1626,9 @@ model_bwd:
     jmp .layer
 
 .embed:
+    ; both streams add into dE, and the next forward overwrites what s2 reads,
+    ; so everything on s2 has to be done here
+    call join
     KF k_embedb
     karg 0, r12
     karg 1, [d_dres]

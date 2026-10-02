@@ -29,6 +29,7 @@ section .rdata
 s_train  db "train\", 0
 s_cfg    db ".cfg", 0
 k_batch  db "batch", 0
+k_check  db "check", 0
 e_usage  db "usage: profile <preset> [key=value ...]", 0
 e_preset db "no such preset (looked for train\<name>.cfg)", 0
 s_gemm   db "gemm_tc", 0
@@ -68,6 +69,10 @@ tfwd     resq 1                 ; f64 ms
 tbwd     resq 1
 topt     resq 1
 unit     resq 1                 ; f64: B H T^2 HD, one causal T x T x HD matmul, all heads
+tmb      resq 1                 ; f64 ms per micro-batch, measured end to end
+streams  resd 1                 ; what the config asked for
+ga       resq 1                 ; host gradients for check=
+gb       resq 1
 ; the key being looked up
 kfn      resq 1
 km       resq 1
@@ -216,8 +221,30 @@ start:
     mov edx, 1
     call model_step
     call gpu_sync
+    mov eax, [mdl_streams]
+    mov [streams], eax
+    call check
 
-    ; the real thing
+    ; the real speed: a few micro-batches end to end, on as many streams as asked
+    call model_zero
+    xor ecx, ecx
+    call gpu_tstart
+    mov ebx, 4
+.timed:
+    lea rcx, [mb]
+    mov edx, FW_GRAD
+    call model_fwd
+    lea rcx, [mb]
+    call model_bwd
+    dec ebx
+    jnz .timed
+    xor ecx, ecx
+    call gpu_tstop
+    divsd xmm0, [c_4]
+    movsd [tmb], xmm0
+
+    ; kernel by kernel. the gaps between launches only mean something on one stream
+    mov dword [mdl_streams], 1
     call model_zero
     call gpu_prof_begin
     lea rcx, [mb]
@@ -240,6 +267,111 @@ start:
     call report
     xor ecx, ecx
     call ExitProcess
+
+; check=N: the gradients of one micro-batch on one stream, then N times on two
+; streams. only the order on the gpu differs, so every bit has to match
+check:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub rsp, 40
+    lea rcx, [k_check]
+    xor edx, edx
+    call cfg_int
+    mov r12, rax
+    test r12, r12
+    jz .done
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    call mem_alloc
+    mov [ga], rax
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    call mem_alloc
+    mov [gb], rax
+    mov dword [mdl_streams], 1
+    mov rcx, [ga]
+    call grads
+    mov dword [mdl_streams], 2
+    xor ebx, ebx                ; runs that matched
+    xor edi, edi                ; run
+.run:
+    cmp rdi, r12
+    jae .report
+    mov rcx, [gb]
+    call grads
+    ; count the floats that differ
+    mov rsi, [ga]
+    mov rdx, [gb]
+    xor ecx, ecx
+    xor eax, eax
+.cmp:
+    mov r8d, [rsi+rcx*4]
+    cmp r8d, [rdx+rcx*4]
+    je .same
+    inc rax
+.same:
+    inc rcx
+    cmp rcx, [mdl+MD_NP]
+    jb .cmp
+    test rax, rax
+    jnz .diff
+    inc rbx
+    inc rdi
+    jmp .run
+.diff:
+    mov [rsp+32], rax
+    say "  check: run "
+    lea rcx, [rdi+1]
+    call print_dec
+    say ", "
+    mov rcx, [rsp+32]
+    call print_dec
+    say " gradient floats differ between one and two streams", 13, 10
+    inc rdi
+    jmp .run
+.report:
+    say "  check: two streams vs one, "
+    mov rcx, rbx
+    call print_dec
+    say " of "
+    mov rcx, r12
+    call print_dec
+    say " runs bit for bit identical over "
+    mov rcx, [mdl+MD_NP]
+    call print_dec
+    say " gradients", 13, 10
+    mov eax, [streams]
+    mov [mdl_streams], eax
+.done:
+    add rsp, 40
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = host buffer: one micro-batch's gradients from zero, downloaded
+grads:
+    push rbx
+    sub rsp, 32
+    mov rbx, rcx
+    call model_zero
+    lea rcx, [mb]
+    mov edx, FW_GRAD
+    call model_fwd
+    lea rcx, [mb]
+    call model_bwd
+    call gpu_sync
+    mov rcx, rbx
+    mov rdx, [d_grad]
+    mov r8, [mdl+MD_NP]
+    shl r8, 2
+    call gpu_down
+    add rsp, 32
+    pop rbx
+    ret
 
 ; rcx, rdx = zero-terminated strings. eax = 1 if they're the same
 streq:
@@ -622,6 +754,39 @@ report:
     mulsd xmm0, [c_1000]
     divsd xmm0, [rsp+40]
     movsd [rsp+48], xmm0        ; tok/s
+    mov edx, 0
+    call print_fixed
+    say " tok/s, "
+    movsd xmm0, [rsp+48]
+    mulsd xmm0, [mdl+MD_FLOPS]
+    divsd xmm0, [c_e12]
+    mov edx, 1
+    call print_fixed
+    say " TFLOPS", 13, 10
+    ; and measured end to end, which is what counts with two streams
+    say "  measured, streams="
+    mov ecx, [streams]
+    call print_dec
+    say ": "
+    movsd xmm0, [tmb]
+    mov edx, 1
+    call print_fixed
+    say " ms per micro-batch, a step "
+    movsd xmm0, [tmb]
+    cvtsi2sd xmm1, qword [nmicro]
+    mulsd xmm0, xmm1
+    addsd xmm0, [topt]
+    movsd [rsp+32], xmm0
+    divsd xmm0, [c_1000]
+    mov edx, 2
+    call print_fixed
+    say " s, "
+    mov rax, [nmicro]
+    imul rax, [mdl+MD_M]
+    cvtsi2sd xmm0, rax
+    mulsd xmm0, [c_1000]
+    divsd xmm0, [rsp+32]
+    movsd [rsp+48], xmm0
     mov edx, 0
     call print_fixed
     say " tok/s, "

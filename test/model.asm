@@ -1147,6 +1147,26 @@ t_whole:
     shl rcx, 2
     repe cmpsb
     check e, "fast path twice: the same gradients, bit for bit"
+
+    ; weight gradients on a second stream beside the dx chain: only the order on
+    ; the gpu changes, so it has to be the same bits. a few times, a race would
+    ; show up as a difference sooner or later
+    mov dword [mdl_streams], 2
+    mov ebx, 3
+.two:
+    mov rcx, [wg1]
+    call wrun
+    mov rsi, [wg1]
+    mov rdi, [wg2]
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    repe cmpsb
+    jne .twodone
+    dec ebx
+    jnz .two
+.twodone:
+    check e, "two streams, 3 runs: the same gradients, bit for bit"
+    mov dword [mdl_streams], 1
     add rsp, 48
     pop rdi
     pop rsi
