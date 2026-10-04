@@ -3,10 +3,10 @@ setlocal enabledelayedexpansion
 rem usage: build test\hello   ->  bin\hello.exe
 
 if "%~1"=="" (echo usage: build path\name & exit /b 1)
-rem webassembly: build site\engine  ->  site\web\engine.wasm
+rem webassembly: build site\engine  ->  site\engine.wasm
 if exist "%~dpn1.wat" (
-    "%~dp0tools\wabt-1.0.42\bin\wat2wasm.exe" --enable-threads "%~dpn1.wat" -o "%~dp0site\web\%~n1.wasm" || exit /b 1
-    echo built site\web\%~n1.wasm
+    "%~dp0tools\wabt-1.0.42\bin\wat2wasm.exe" --enable-threads "%~dpn1.wat" -o "%~dpn1.wasm" || exit /b 1
+    echo built %~1.wasm
     exit /b 0
 )
 set SRC=%~dpn1.asm

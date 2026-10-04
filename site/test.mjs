@@ -19,7 +19,7 @@ const path = p => root + p
 let bad = 0
 const check = (ok, what) => { console.log((ok ? '  ok    ' : '  FAIL  ') + what); if (!ok) bad++ }
 
-const module = new WebAssembly.Module(readFileSync(path('site/web/engine.wasm')))
+const module = new WebAssembly.Module(readFileSync(path('site/engine.wasm')))
 const mem = new WebAssembly.Memory({ initial: 64, maximum: 65536, shared: true })
 const e = new WebAssembly.Instance(module, { env: { mem } }).exports
 const put = bytes => { const p = e.alloc(bytes.length); new Uint8Array(mem.buffer, p, bytes.length).set(bytes); return p }
