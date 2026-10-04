@@ -4,7 +4,7 @@ rem builds every test program and every tool, then runs the self-checking tests
 pushd "%~dp0"
 set BAD=0
 
-for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu grad model infer) do (
+for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu grad model infer asmdata) do (
     call .\build.bat test\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 rem the tools too, so nothing rots unnoticed
@@ -53,6 +53,8 @@ echo == stop and resume training
 bin\resume.exe || set BAD=1
 echo == cpu inference
 bin\infer.exe || set BAD=1
+echo == nasm lesson tools (builds and runs candidates)
+bin\asmdata.exe || set BAD=1
 echo == the webassembly engine vs bin\chat
 node site\test.mjs threads=12 || set BAD=1
 
