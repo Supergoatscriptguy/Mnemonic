@@ -182,6 +182,173 @@ done:
     ret;
 }
 
+// mxq for the other way round: x [rows][cols] (bf16, or f32 with flag 8) -> q
+// [cols][rows] and s [cols][rows/32], blocks of 32 going down a column. that's what
+// a matmul needs when its k is x's rows (the tokens, for weight gradients) or for a
+// transposed weight. thread i does column i%cols of row block i/cols, so a warp
+// loads side by side. rows a multiple of 32, grid stride
+.visible .entry mxqt(
+    .param .u64 px,
+    .param .u64 pq,
+    .param .u64 ps,
+    .param .u32 prows,
+    .param .u32 pcols,
+    .param .u32 pf)
+{
+    .reg .pred  %p, %pw;
+    .reg .b32   %r<24>;
+    .reg .b32   %w<8>;
+    .reg .b64   %rd<12>;
+    .reg .f32   %x<32>;
+    .reg .f32   %f<4>;
+    .reg .b16   %h<16>;
+
+    ld.param.u32    %r1, [prows];
+    ld.param.u32    %r2, [pcols];
+    ld.param.u32    %r3, [pf];
+    and.b32         %r3, %r3, 8;
+    setp.ne.u32     %pw, %r3, 0;
+    shr.u32         %r4, %r1, 5;                // row blocks
+    mul.lo.u32      %r5, %r4, %r2;              // blocks
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.u32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %nctaid.x;
+    mul.lo.u32      %r10, %r10, %r7;
+    selp.u32        %r11, 4, 2, %pw;            // element size
+    mul.wide.u32    %rd1, %r2, %r11;            // a row in bytes
+blk:
+    setp.ge.u32     %p, %r9, %r5;
+    @%p bra         done;
+    rem.u32         %r12, %r9, %r2;             // column
+    div.u32         %r13, %r9, %r2;             // row block
+    shl.b32         %r14, %r13, 5;
+    mul.wide.u32    %rd2, %r14, %r2;
+    cvt.u64.u32     %rd3, %r12;
+    add.u64         %rd2, %rd2, %rd3;
+    cvt.u64.u32     %rd3, %r11;
+    mul.lo.u64      %rd2, %rd2, %rd3;
+    ld.param.u64    %rd4, [px];
+    add.u64         %rd4, %rd4, %rd2;           // x[rb*32][c]
+    @%pw bra        wide;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x0, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x1, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x2, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x3, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x4, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x5, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x6, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x7, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x8, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x9, %r15;   add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x10, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x11, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x12, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x13, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x14, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x15, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x16, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x17, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x18, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x19, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x20, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x21, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x22, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x23, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x24, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x25, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x26, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x27, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x28, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x29, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x30, %r15;  add.u64 %rd4, %rd4, %rd1;
+    ld.global.u16 %r15, [%rd4];  shl.b32 %r15, %r15, 16;  mov.b32 %x31, %r15;
+    bra             scale;
+wide:
+    ld.global.f32 %x0, [%rd4];   add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x1, [%rd4];   add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x2, [%rd4];   add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x3, [%rd4];   add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x4, [%rd4];   add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x5, [%rd4];   add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x6, [%rd4];   add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x7, [%rd4];   add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x8, [%rd4];   add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x9, [%rd4];   add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x10, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x11, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x12, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x13, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x14, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x15, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x16, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x17, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x18, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x19, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x20, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x21, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x22, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x23, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x24, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x25, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x26, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x27, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x28, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x29, [%rd4];  add.u64 %rd4, %rd4, %rd1;
+    ld.global.f32 %x30, [%rd4];  add.u64 %rd4, %rd4, %rd1;   ld.global.f32 %x31, [%rd4];
+scale:
+    // from here it's mxq's
+    abs.f32 %f0, %x0;
+    abs.f32 %f1, %x1;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x2;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x3;   max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x4;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x5;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x6;   max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x7;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x8;   max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x9;   max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x10;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x11;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x12;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x13;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x14;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x15;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x16;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x17;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x18;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x19;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x20;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x21;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x22;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x23;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x24;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x25;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x26;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x27;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x28;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x29;  max.f32 %f0, %f0, %f1;   abs.f32 %f1, %x30;  max.f32 %f0, %f0, %f1;
+    abs.f32 %f1, %x31;  max.f32 %f0, %f0, %f1;
+    mov.b32         %r16, %f0;
+    shr.u32         %r17, %r16, 23;
+    and.b32         %r18, %r16, 0x7fffff;
+    setp.gt.u32     %p, %r18, 0x600000;
+    selp.u32        %r18, 1, 0, %p;
+    add.u32         %r17, %r17, %r18;
+    sub.s32         %r17, %r17, 8;
+    max.s32         %r17, %r17, 1;
+    min.s32         %r17, %r17, 253;
+    setp.eq.u32     %p, %r16, 0;
+    selp.u32        %r17, 127, %r17, %p;
+    mov.u32         %r19, 254;
+    sub.u32         %r19, %r19, %r17;
+    shl.b32         %r19, %r19, 23;
+    mov.b32         %f1, %r19;
+    mul.f32 %x0, %x0, %f1;    mul.f32 %x1, %x1, %f1;    mul.f32 %x2, %x2, %f1;    mul.f32 %x3, %x3, %f1;
+    mul.f32 %x4, %x4, %f1;    mul.f32 %x5, %x5, %f1;    mul.f32 %x6, %x6, %f1;    mul.f32 %x7, %x7, %f1;
+    mul.f32 %x8, %x8, %f1;    mul.f32 %x9, %x9, %f1;    mul.f32 %x10, %x10, %f1;  mul.f32 %x11, %x11, %f1;
+    mul.f32 %x12, %x12, %f1;  mul.f32 %x13, %x13, %f1;  mul.f32 %x14, %x14, %f1;  mul.f32 %x15, %x15, %f1;
+    mul.f32 %x16, %x16, %f1;  mul.f32 %x17, %x17, %f1;  mul.f32 %x18, %x18, %f1;  mul.f32 %x19, %x19, %f1;
+    mul.f32 %x20, %x20, %f1;  mul.f32 %x21, %x21, %f1;  mul.f32 %x22, %x22, %f1;  mul.f32 %x23, %x23, %f1;
+    mul.f32 %x24, %x24, %f1;  mul.f32 %x25, %x25, %f1;  mul.f32 %x26, %x26, %f1;  mul.f32 %x27, %x27, %f1;
+    mul.f32 %x28, %x28, %f1;  mul.f32 %x29, %x29, %f1;  mul.f32 %x30, %x30, %f1;  mul.f32 %x31, %x31, %f1;
+    cvt.rn.satfinite.e4m3x2.f32 %h0, %x1, %x0;      cvt.rn.satfinite.e4m3x2.f32 %h1, %x3, %x2;
+    cvt.rn.satfinite.e4m3x2.f32 %h2, %x5, %x4;      cvt.rn.satfinite.e4m3x2.f32 %h3, %x7, %x6;
+    cvt.rn.satfinite.e4m3x2.f32 %h4, %x9, %x8;      cvt.rn.satfinite.e4m3x2.f32 %h5, %x11, %x10;
+    cvt.rn.satfinite.e4m3x2.f32 %h6, %x13, %x12;    cvt.rn.satfinite.e4m3x2.f32 %h7, %x15, %x14;
+    cvt.rn.satfinite.e4m3x2.f32 %h8, %x17, %x16;    cvt.rn.satfinite.e4m3x2.f32 %h9, %x19, %x18;
+    cvt.rn.satfinite.e4m3x2.f32 %h10, %x21, %x20;   cvt.rn.satfinite.e4m3x2.f32 %h11, %x23, %x22;
+    cvt.rn.satfinite.e4m3x2.f32 %h12, %x25, %x24;   cvt.rn.satfinite.e4m3x2.f32 %h13, %x27, %x26;
+    cvt.rn.satfinite.e4m3x2.f32 %h14, %x29, %x28;   cvt.rn.satfinite.e4m3x2.f32 %h15, %x31, %x30;
+    mov.b32 %w0, {%h0, %h1};    mov.b32 %w1, {%h2, %h3};    mov.b32 %w2, {%h4, %h5};    mov.b32 %w3, {%h6, %h7};
+    mov.b32 %w4, {%h8, %h9};    mov.b32 %w5, {%h10, %h11};  mov.b32 %w6, {%h12, %h13};  mov.b32 %w7, {%h14, %h15};
+    // q[c][rb*32..], s[c][rb]
+    mul.wide.u32    %rd5, %r12, %r1;
+    cvt.u64.u32     %rd6, %r14;
+    add.u64         %rd5, %rd5, %rd6;
+    ld.param.u64    %rd7, [pq];
+    add.u64         %rd7, %rd7, %rd5;
+    st.global.v4.b32 [%rd7], {%w0, %w1, %w2, %w3};
+    st.global.v4.b32 [%rd7+16], {%w4, %w5, %w6, %w7};
+    mul.wide.u32    %rd8, %r12, %r4;
+    cvt.u64.u32     %rd9, %r13;
+    add.u64         %rd8, %rd8, %rd9;
+    ld.param.u64    %rd10, [ps];
+    add.u64         %rd10, %rd10, %rd8;
+    st.global.u8    [%rd10], %r17;
+    add.u32         %r9, %r9, %r10;
+    bra             blk;
+done:
+    ret;
+}
+
 // the reference: C = R + A B^T where A = qa * 2^(sa-127) and B = qb * 2^(sb-127).
 // every value gets decoded to f32 on its own (exact) and added up with a plain fma
 // in k order. A is M x K, B is N x K, scales M x K/32 and N x K/32. flag 4: bf16 C.

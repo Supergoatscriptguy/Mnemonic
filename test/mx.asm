@@ -21,6 +21,7 @@ BIG   equ 16 << 20              ; buffer size
 section .rdata
 k_probe  db "mx_probe", 0
 k_mxq    db "mxq", 0
+k_mxqt   db "mxqt", 0
 k_mm     db "mm_mx", 0
 k_gemm   db "gemm_mx", 0
 k_ref    db "mm_ref", 0
@@ -58,6 +59,10 @@ d_r      resq 1
 d_r2     resq 1
 rng      resb RNG_SIZE
 e4       resd 256               ; every e4m3 code as an f32
+qref     resb 32                ; cpuq's codes
+col32    resd 32                ; a column block, gathered
+loose    resq 1
+f_mxqt   resq 1
 
 section .text
 
@@ -94,6 +99,7 @@ start:
     mov r12, rax
     getf r12, k_probe, f_probe
     getf r12, k_mxq, f_mxq
+    getf r12, k_mxqt, f_mxqt
     getf r12, k_mm, f_mm
     getf r12, k_gemm, f_gemm
     lea rcx, [ptx_gemm]
@@ -128,6 +134,10 @@ start:
     call t_quant
     xor ecx, ecx
     call t_quant
+    mov ecx, 8
+    call t_quantt
+    xor ecx, ecx
+    call t_quantt
     say "matmul", 13, 10
     call t_mref
     mov ecx, 128
@@ -482,12 +492,62 @@ t_quant:
     ; the cpu's turn, a block at a time
     xor r12d, r12d              ; block
     xor r13d, r13d              ; codes or scales that differ
-    xor r14d, r14d              ; scales that aren't the smallest that fits
+    mov qword [loose], 0
 .blk:
-    mov rsi, [hx]
+    mov rcx, [hx]
     mov eax, r12d
     shl eax, 7
-    add rsi, rax                ; the block's 32 floats
+    add rcx, rax
+    call cpuq
+    mov rdx, [hs]
+    movzx ecx, byte [rdx+r12]
+    cmp eax, ecx
+    je .sok
+    inc r13d
+.sok:
+    mov rsi, [hq]
+    mov eax, r12d
+    shl eax, 5
+    add rsi, rax
+    lea rdi, [qref]
+    mov ecx, 32
+    repe cmpsb
+    je .qok
+    inc r13d
+.qok:
+    inc r12d
+    cmp r12d, QB
+    jb .blk
+
+    test r15d, r15d
+    jz .nb16
+    test r13d, r13d
+    check z, "mxq, f32 in: 65536 values and 2048 scales, the same as the cpu"
+    jmp .prop
+.nb16:
+    test r13d, r13d
+    check z, "mxq, bf16 in: 65536 values and 2048 scales, the same as the cpu"
+.prop:
+    cmp qword [loose], 0
+    check e, "every scale is the smallest power of two that fits its block"
+    add rsp, 48
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = 32 floats -> eax = their scale byte the cpu's way, and their codes in qref.
+; a scale that isn't the smallest power of two that fits counts in loose
+cpuq:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 48
+    mov rsi, rcx
     xor eax, eax                ; max |x| as bits
     xor ecx, ecx
 .max:
@@ -529,14 +589,8 @@ t_quant:
     vcomiss xmm0, [f_448]
     ja .gots
 .loose:
-    inc r14d
+    inc qword [loose]
 .gots:
-    mov rax, [hs]
-    movzx eax, byte [rax+r12]
-    cmp eax, edi
-    je .sok
-    inc r13d
-.sok:
     mov ecx, 254
     sub ecx, edi
     shl ecx, 23
@@ -546,33 +600,171 @@ t_quant:
     vmovss xmm0, [rsi+rbx*4]
     vmulss xmm0, xmm0, [rsp+32]
     call enc
-    mov rdx, [hq]
-    mov ecx, r12d
-    shl ecx, 5
-    add ecx, ebx
-    movzx ecx, byte [rdx+rcx]
-    cmp eax, ecx
-    je .eok
-    inc r13d
-.eok:
+    lea rdx, [qref]
+    mov [rdx+rbx], al
     inc ebx
     cmp ebx, 32
     jb .el
+    mov eax, edi
+    add rsp, 48
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; ---- mxqt against the cpu: x is TR x TC, quantized down its columns into [TC][TR].
+; ecx = 8 for f32 input, 0 for bf16. scales vary with the column and the row block
+TR equ 128
+TC equ 200
+t_quantt:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 48
+    mov r15d, ecx
+    mov rbx, [hx]
+    xor esi, esi
+.fill:
+    lea rcx, [rng]
+    call rng_normal
+    cvtsd2ss xmm0, xmm0
+    mov eax, esi
+    xor edx, edx
+    mov ecx, TC
+    div ecx                     ; eax = row, edx = column
+    shr eax, 5
+    add eax, edx
+    xor edx, edx
+    mov ecx, 41
+    div ecx
+    lea eax, [rdx+107]          ; 2^((c + r/32)%41 - 20)
+    shl eax, 23
+    vmovd xmm1, eax
+    vmulss xmm0, xmm0, xmm1
+    vmovss [rbx+rsi*4], xmm0
+    inc esi
+    cmp esi, TR * TC
+    jb .fill
+    test r15d, r15d
+    jnz .up
+    mov rdi, [hy]
+    xor esi, esi
+.b16:
+    mov r8d, [rbx+rsi*4]
+    mov r10d, r8d
+    shr r10d, 16
+    and r10d, 1
+    add r8d, 0x7fff
+    add r8d, r10d
+    shr r8d, 16
+    mov [rdi+rsi*2], r8w
+    shl r8d, 16
+    mov [rbx+rsi*4], r8d
+    inc esi
+    cmp esi, TR * TC
+    jb .b16
+    mov rcx, [d_x]
+    mov rdx, [hy]
+    mov r8d, TR * TC * 2
+    call gpu_up
+    jmp .run
+.up:
+    mov rcx, [d_x]
+    mov rdx, [hx]
+    mov r8d, TR * TC * 4
+    call gpu_up
+.run:
+    lea rbx, [kl]
+    mov rax, [f_mxqt]
+    mov [rbx+KL_FUNC], rax
+    grid (TC * TR / 32 + 255) / 256, 1, 256, 1
+    mov rax, [d_x]
+    mov [rbx+KL_ARGS], rax
+    mov rax, [d_qa]
+    mov [rbx+KL_ARGS+8], rax
+    mov rax, [d_sa]
+    mov [rbx+KL_ARGS+16], rax
+    mov qword [rbx+KL_ARGS+24], TR
+    mov qword [rbx+KL_ARGS+32], TC
+    mov [rbx+KL_ARGS+40], r15
+    mov rcx, rbx
+    call gpu_launch
+    call gpu_sync
+    mov rcx, [hq]
+    mov rdx, [d_qa]
+    mov r8d, TR * TC
+    call gpu_down
+    mov rcx, [hs]
+    mov rdx, [d_sa]
+    mov r8d, TR * TC / 32
+    call gpu_down
+
+    xor r12d, r12d              ; column
+    xor r13d, r13d              ; differences
+    mov qword [loose], 0
+.col:
+    xor r14d, r14d              ; row block
+.rb:
+    ; gather x[rb*32 + j][c]
+    mov rsi, [hx]
+    mov eax, r14d
+    shl eax, 5
+    imul eax, eax, TC
+    add eax, r12d
+    lea rsi, [rsi+rax*4]
+    lea rdi, [col32]
+    xor ecx, ecx
+.g:
+    mov eax, [rsi]
+    mov [rdi+rcx*4], eax
+    add rsi, TC * 4
+    inc ecx
+    cmp ecx, 32
+    jb .g
+    lea rcx, [col32]
+    call cpuq
+    imul ecx, r12d, TR / 32
+    add ecx, r14d
+    mov rdx, [hs]
+    movzx ecx, byte [rdx+rcx]
+    cmp eax, ecx
+    je .sok
+    inc r13d
+.sok:
+    imul eax, r12d, TR
+    mov ecx, r14d
+    shl ecx, 5
+    add eax, ecx
+    mov rsi, [hq]
+    add rsi, rax
+    lea rdi, [qref]
+    mov ecx, 32
+    repe cmpsb
+    je .qok
+    inc r13d
+.qok:
+    inc r14d
+    cmp r14d, TR / 32
+    jb .rb
     inc r12d
-    cmp r12d, QB
-    jb .blk
+    cmp r12d, TC
+    jb .col
 
     test r15d, r15d
     jz .nb16
     test r13d, r13d
-    check z, "mxq, f32 in: 65536 values and 2048 scales, the same as the cpu"
+    check z, "mxqt, f32 in: 128x200 down the columns, the same as the cpu"
     jmp .prop
 .nb16:
     test r13d, r13d
-    check z, "mxq, bf16 in: 65536 values and 2048 scales, the same as the cpu"
+    check z, "mxqt, bf16 in: 128x200 down the columns, the same as the cpu"
 .prop:
-    test r14d, r14d
-    check z, "every scale is the smallest power of two that fits its block"
+    cmp qword [loose], 0
+    check e, "every scale is the smallest power of two that fits its block"
     add rsp, 48
     pop r15
     pop r14

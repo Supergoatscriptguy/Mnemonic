@@ -975,7 +975,9 @@ WM equ WB * WT
 section .rdata
 align 8
 c_wgtol dq 2e-2
+c_wg8   dq 0.15
 m_wg    db "fast gradients vs naive, |g_fast - g_naive| / |g_naive|", 0
+m_wg8   db "fp8 gradients vs bf16, |g_fp8 - g_bf16| / |g_bf16|", 0
 
 section .bss
 alignb 8
@@ -1031,10 +1033,12 @@ t_whole:
     mov rax, __?float64?__(10000.0)
     mov [mdl+MD_ROPE], rax
     mov dword [mdl_fast], 1         ; so setup checks the shapes
+    mov dword [mdl_fp8], 1          ; loads and sets up the fp8 side too, used at the end
     mov ecx, 2
     call model_setup
     mov ecx, 11
     call model_init
+    mov dword [mdl_fp8], 0
 
     mov ecx, 65536
     call mem_alloc
@@ -1167,6 +1171,71 @@ t_whole:
 .twodone:
     check e, "two streams, 3 runs: the same gradients, bit for bit"
     mov dword [mdl_streams], 1
+
+    ; mxfp8: the layers' matmuls in fp8. close to bf16 (wg2 still has its gradients)
+    ; but not equal, and still the same bits every time, on either stream setup
+    mov dword [mdl_fp8], 1
+    mov rcx, [wg1]
+    call wrun
+    movsd [rsp+32], xmm0
+    say "  loss fp8 "
+    movsd xmm0, [rsp+32]
+    mov edx, 5
+    call print_fixed
+    say 13, 10
+    movsd xmm0, [rsp+32]
+    subsd xmm0, [wloss]
+    close_to 0.0, 2e-2, "fp8 loss = naive loss (abs diff)"
+    mov rsi, [wg2]
+    mov rdi, [wg1]
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    xor ecx, ecx
+.g8:
+    cvtss2sd xmm0, [rsi+rcx*4]
+    cvtss2sd xmm1, [rdi+rcx*4]
+    subsd xmm1, xmm0
+    mulsd xmm1, xmm1
+    addsd xmm2, xmm1
+    mulsd xmm0, xmm0
+    addsd xmm3, xmm0
+    inc rcx
+    cmp rcx, [mdl+MD_NP]
+    jb .g8
+    divsd xmm2, xmm3
+    sqrtsd xmm0, xmm2
+    movsd [rsp+40], xmm0
+    comisd xmm0, [c_wg8]
+    setb cl
+    movzx ecx, cl
+    lea rdx, [m_wg8]
+    movsd xmm2, [rsp+40]
+    call t_okf
+    mov rcx, [wg2]
+    call wrun
+    mov rsi, [wg1]
+    mov rdi, [wg2]
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    repe cmpsb
+    check e, "fp8 twice: the same gradients, bit for bit"
+    mov dword [mdl_streams], 2
+    mov ebx, 3
+.two8:
+    mov rcx, [wg2]
+    call wrun
+    mov rsi, [wg1]
+    mov rdi, [wg2]
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    repe cmpsb
+    jne .two8done
+    dec ebx
+    jnz .two8
+.two8done:
+    check e, "fp8 on two streams, 3 runs: the same gradients, bit for bit"
+    mov dword [mdl_streams], 1
+    mov dword [mdl_fp8], 0
     add rsp, 48
     pop rdi
     pop rsi

@@ -9,7 +9,7 @@ bits 64
 %include "model/model.inc"
 
 extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_ops, ptx_ops_end
-extern ptx_attn, ptx_attn_end
+extern ptx_attn, ptx_attn_end, ptx_mx, ptx_mx_end
 
 NCH     equ 64                  ; row chunks for the rmsnorm weight gradient
 NSQ     equ 256                 ; blocks for the gradient norm
@@ -46,6 +46,9 @@ kn_fdkv    db "flash_dkv", 0
 kn_mmref   db "mm_ref", 0
 kn_gemmtc  db "gemm_tc", 0
 kn_f2bf    db "f2bf", 0
+kn_mxq     db "mxq", 0
+kn_mxqt    db "mxqt", 0
+kn_gmx     db "gemm_mx", 0
 
 ck_layer   db "n_layer", 0
 ck_d       db "d_model", 0
@@ -57,7 +60,9 @@ ck_ctx     db "ctx", 0
 ck_micro   db "micro", 0
 ck_rope    db "rope_base", 0
 ck_streams db "streams", 0
+ck_fp8     db "fp8", 0
 e_heads    db "n_head has to be a multiple of n_kv_head, and d_model of n_head", 0
+e_fp8      db "fp8=1 needs the fast kernels", 0
 e_fast     db "the fast kernels need head dim 64, ctx a multiple of 64, and d_model, ffn, vocab, heads*64 and micro*ctx multiples of 128", 0
 
 align 8
@@ -70,11 +75,23 @@ c_onef     dd 1.0
 
 section .bss
 alignb 8
-global mdl, mdl_fast, mdl_streams, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
+global mdl, mdl_fast, mdl_streams, mdl_fp8, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
 global k_f2bf, mm_ref_f, mm_tc_f
 mdl        resb MD_SIZE
 mdl_fast   resd 1
 mdl_streams resd 1              ; 2 = weight gradients on a second stream in the backward
+mdl_fp8    resd 1               ; 1 = the layers' matmuls in mxfp8 (MM_X8 ones)
+mmbfx      resq 1               ; mmbf, mmbftb plus MM_X8
+mmbftbx    resq 1
+d_wq       resq 1               ; fp8 copies of the matrices, at their param offsets:
+d_ws       resq 1               ;   as they are (and their scales, offset/32)
+d_wqt      resq 1               ;   transposed
+d_wst      resq 1
+mxs0       resq 4               ; fp8 scratch for stream 0: A values, scales, B values, scales
+mxs2       resq 4               ; and for s2
+k_mxq      resq 1
+k_mxqt     resq 1
+k_gmx      resq 1
 s2         resq 1               ; that stream
 ev_fork    resq 1               ; stream 0 up to here, for s2 to wait on
 ev_drest   resq 1               ; after the last s2 op that reads drest, dh, dxn, dqkv
@@ -231,6 +248,13 @@ mm_go:
     add rsp, 56
     ret
 .fast:
+    test dword [kl+KL_ARGS+56], MM_X8
+    jz .tc
+    cmp dword [mdl_fp8], 0
+    je .tc
+    add rsp, 56
+    jmp mx_mm
+.tc:
     KF mm_tc_f
     mov ecx, [kl+KL_ARGS+32]
     shr ecx, 7
@@ -301,6 +325,294 @@ mm_go:
     add rsp, 56
     ret
 
+; the matmul in kl (gemm_tc's args: a b c m n k r flags) in mxfp8. A is an activation
+; or a gradient and gets quantized here, along k. B is a weight, whose fp8 copies
+; quantw keeps (transposed for MM_TB), or for a weight gradient an activation stored
+; [K][N]. each stream quantizes into its own scratch
+mx_mm:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 64
+    mov rsi, [kl+KL_ARGS]
+    mov rdi, [kl+KL_ARGS+8]
+    mov rax, [kl+KL_ARGS+16]
+    mov [rsp+40], rax           ; C
+    mov r12, [kl+KL_ARGS+24]    ; M
+    mov r13, [kl+KL_ARGS+32]    ; N
+    mov r14, [kl+KL_ARGS+40]    ; K
+    mov rax, [kl+KL_ARGS+48]
+    mov [rsp+48], rax           ; R
+    mov r15, [kl+KL_ARGS+56]
+    lea rbx, [mxs0]
+    cmp qword [kl+KL_STREAM], 0
+    je .a
+    lea rbx, [mxs2]
+.a:
+    test r15d, MM_TA
+    jnz .at
+    mov rcx, rsi                ; [M][K]
+    mov rdx, r12
+    imul rdx, r14
+    mov r8, [rbx]
+    mov r9, [rbx+8]
+    call qrows
+    jmp .b
+.at:
+    mov rcx, rsi                ; stored [K][M]
+    mov rdx, r14
+    mov r8, r12
+    mov r9, [rbx]
+    mov rax, [rbx+8]
+    mov [rsp+32], rax
+    call qcols
+.b:
+    mov rax, rdi
+    sub rax, [d_bf]
+    jb .bact
+    shr rax, 1                  ; its param offset
+    cmp rax, [mdl+MD_NP]
+    jae .bact
+    mov rcx, rax
+    shr rcx, 5
+    test r15d, MM_TB
+    jnz .bt
+    mov rdi, [d_wq]
+    add rdi, rax
+    mov rsi, [d_ws]
+    add rsi, rcx
+    jmp .run
+.bt:
+    mov rdi, [d_wqt]
+    add rdi, rax
+    mov rsi, [d_wst]
+    add rsi, rcx
+    jmp .run
+.bact:
+    mov rcx, rdi                ; stored [K][N]
+    mov rdx, r14
+    mov r8, r13
+    mov r9, [rbx+16]
+    mov rax, [rbx+24]
+    mov [rsp+32], rax
+    call qcols
+    mov rdi, [rbx+16]
+    mov rsi, [rbx+24]
+.run:
+    KF k_gmx
+    mov rax, [rbx]
+    mov [kl+KL_ARGS], rax
+    mov rax, [rbx+8]
+    mov [kl+KL_ARGS+8], rax
+    mov [kl+KL_ARGS+16], rdi
+    mov [kl+KL_ARGS+24], rsi
+    mov rax, [rsp+40]
+    mov [kl+KL_ARGS+32], rax
+    mov [kl+KL_ARGS+40], r12
+    mov [kl+KL_ARGS+48], r13
+    mov [kl+KL_ARGS+56], r14
+    mov rax, [rsp+48]
+    mov [kl+KL_ARGS+64], rax
+    mov eax, r15d
+    and eax, MM_BF
+    mov [kl+KL_ARGS+72], rax
+    mov ecx, r13d
+    shr ecx, 7
+    mov edx, r12d
+    shr edx, 7
+    ; a weight gradient with few output tiles splits its k, the way mm_go does it
+    test r15d, MM_TA
+    jz .one
+    mov eax, ecx
+    imul eax, edx               ; tiles
+    mov r8d, [gpu_nsm]
+    add r8d, r8d
+    mov r9d, r14d
+    shr r9d, 6                  ; k tiles
+    mov r10d, 1
+.more:
+    cmp r10d, 8
+    jae .split
+    mov r11d, eax
+    imul r11d, r10d
+    cmp r11d, r8d
+    jae .split
+    lea r11d, [r10d*2-1]
+    test r9d, r11d
+    jnz .split
+    add r10d, r10d
+    jmp .more
+.split:
+    cmp r10d, 1
+    je .one
+    mov rax, [d_split]
+    mov [kl+KL_ARGS+32], rax
+    mov qword [kl+KL_ARGS+64], 0
+    mov [rsp+56], r10
+    mov [kl+KL_GX], ecx
+    mov [kl+KL_GY], edx
+    mov [kl+KL_GZ], r10d
+    mov dword [kl+KL_BX], 256
+    mov dword [kl+KL_BY], 1
+    mov dword [kl+KL_BZ], 1
+    lea rcx, [kl]
+    call gpu_launch
+    mov rcx, r12
+    imul rcx, r13
+    KF k_splitsum
+    karg 0, [rsp+40]
+    karg 1, [rsp+48]
+    karg 2, [d_split]
+    mov [kl+KL_ARGS+24], rcx
+    karg 4, [rsp+56]
+    cmp ecx, 1 << 20
+    jbe .lin
+    mov ecx, 1 << 20
+.lin:
+    call lin
+    jmp .out
+.one:
+    mov r8d, 256
+    mov r9d, 1
+    call launch
+.out:
+    add rsp, 64
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = bf16 x, rdx = values, r8 = q, r9 = scales: mxq, blocks along the rows
+qrows:
+    sub rsp, 40
+    KF k_mxq
+    karg 0, rcx
+    karg 1, r8
+    karg 2, r9
+    shr rdx, 5
+    karg 3, rdx
+    karg 4, 0
+    mov rcx, rdx
+    call lin
+    add rsp, 40
+    ret
+
+; rcx = bf16 x [rows][cols], rdx = rows, r8 = cols, r9 = q, 5th = scales: mxqt,
+; into [cols][rows] with blocks down the columns
+qcols:
+    sub rsp, 40
+    KF k_mxqt
+    karg 0, rcx
+    karg 1, r9
+    mov rax, [rsp+80]
+    mov [kl+KL_ARGS+16], rax
+    karg 3, rdx
+    karg 4, r8
+    karg 5, 0
+    mov rcx, rdx
+    shr rcx, 5
+    imul rcx, r8
+    call lin
+    add rsp, 40
+    ret
+
+; the fp8 copies of every layer's matrices, from the f32 masters
+quantw:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rsi, [lp]
+    xor ebx, ebx
+.l:
+    cmp rbx, [mdl+MD_L]
+    jae .done
+    mov rcx, [rsi+LP_WQKV]
+    mov rdx, [mdl+MD_QKV]
+    mov r8, [mdl+MD_D]
+    call quant1
+    mov rcx, [rsi+LP_WO]
+    mov rdx, [mdl+MD_D]
+    mov r8, [mdl+MD_QD]
+    call quant1
+    mov rcx, [rsi+LP_W13]
+    mov rdx, [mdl+MD_F]
+    add rdx, rdx
+    mov r8, [mdl+MD_D]
+    call quant1
+    mov rcx, [rsi+LP_W2]
+    mov rdx, [mdl+MD_D]
+    mov r8, [mdl+MD_F]
+    call quant1
+    add rsi, LP_SIZE
+    inc rbx
+    jmp .l
+.done:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a matrix's operand pointer (into d_bf), rdx = rows (N), r8 = cols (K).
+; quantizes its f32 master as it is (for the forward) and transposed (for dx)
+quant1:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 48
+    sub rcx, [d_bf]
+    shr rcx, 1
+    mov rbx, rcx                ; param offset
+    mov rsi, rdx
+    mov rdi, r8
+    KF k_mxq
+    mov rax, [d_params]
+    lea rax, [rax+rbx*4]
+    mov [kl+KL_ARGS], rax
+    mov rax, [d_wq]
+    add rax, rbx
+    mov [kl+KL_ARGS+8], rax
+    mov rax, rbx
+    shr rax, 5
+    add rax, [d_ws]
+    mov [kl+KL_ARGS+16], rax
+    mov rcx, rsi
+    imul rcx, rdi
+    shr rcx, 5
+    mov [kl+KL_ARGS+24], rcx
+    mov qword [kl+KL_ARGS+32], 8    ; f32 in
+    call lin
+    KF k_mxqt
+    mov rax, [d_params]
+    lea rax, [rax+rbx*4]
+    mov [kl+KL_ARGS], rax
+    mov rax, [d_wqt]
+    add rax, rbx
+    mov [kl+KL_ARGS+8], rax
+    mov rax, rbx
+    shr rax, 5
+    add rax, [d_wst]
+    mov [kl+KL_ARGS+16], rax
+    mov [kl+KL_ARGS+24], rsi
+    mov [kl+KL_ARGS+32], rdi
+    mov qword [kl+KL_ARGS+40], 8
+    mov rcx, rsi
+    shr rcx, 5
+    imul rcx, rdi
+    call lin
+    add rsp, 48
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
 ; reads the model's shape from the config (cfg_load/cfg_args first)
 %macro cfgi 3                   ; field, key, default
     lea rcx, [%2]
@@ -328,6 +640,10 @@ model_config:
     mov edx, 1
     call cfg_int
     mov [mdl_streams], eax
+    lea rcx, [ck_fp8]
+    xor edx, edx
+    call cfg_int
+    mov [mdl_fp8], eax
     add rsp, 40
     ret
 
@@ -367,6 +683,7 @@ fl_attn dq kn_attdot, k_attdot, kn_attsm, k_attsm, kn_attmix, k_attmix
         dq kn_ffwd, k_ffwd, kn_attnd, k_attnd, kn_fdq, k_fdq, kn_fdkv, k_fdkv, 0
 fl_gemm dq kn_mmref, mm_ref_f, kn_gemmtc, mm_tc_f, 0
 fl_basic dq kn_f2bf, k_f2bf, 0
+fl_mx   dq kn_mxq, k_mxq, kn_mxqt, k_mxqt, kn_gmx, k_gmx, 0
 section .text
 
 ; rcx = bytes. device memory, counted in vram
@@ -404,6 +721,10 @@ model_setup:
     mov [mmbf], rax
     or eax, MM_TB
     mov [mmbftb], rax
+    or eax, MM_X8
+    mov [mmbftbx], rax
+    and eax, ~MM_TB
+    mov [mmbfx], rax
 
     ; shapes
     mov rax, [mdl+MD_D]
@@ -515,6 +836,20 @@ model_setup:
     lea rdx, [ptx_basic_end]
     lea r8, [fl_basic]
     call getfuncs
+    cmp dword [mdl_fp8], 0
+    je .nomx
+    cmp dword [mdl_fast], 0
+    jne .mx
+    lea rcx, [e_fp8]
+    call fatal
+.mx:
+    mov dword [gpu_arch], 1     ; block-scaled mma, sm_120a
+    lea rcx, [ptx_mx]
+    lea rdx, [ptx_mx_end]
+    lea r8, [fl_mx]
+    call getfuncs
+    mov dword [gpu_arch], 0
+.nomx:
 
     ; parameter buffers
     mov rbx, [mdl+MD_NP]
@@ -669,6 +1004,50 @@ model_setup:
     call dalloc
     mov [d_s2], rax
 .nonaive:
+    cmp dword [mdl_fp8], 0
+    je .nomxbuf
+    ; fp8 weights (a byte a param, a scale per 32), both ways round
+    mov rcx, [mdl+MD_NP]
+    call dalloc
+    mov [d_wq], rax
+    mov rcx, [mdl+MD_NP]
+    call dalloc
+    mov [d_wqt], rax
+    mov rcx, [mdl+MD_NP]
+    shr rcx, 5
+    call dalloc
+    mov [d_ws], rax
+    mov rcx, [mdl+MD_NP]
+    shr rcx, 5
+    call dalloc
+    mov [d_wst], rax
+    ; scratch for quantized activations: M times the widest operand, per stream
+    mov r15, [mdl+MD_D]
+    mov rax, [mdl+MD_QD]
+    cmp rax, r15
+    cmova r15, rax
+    mov rax, [mdl+MD_QKV]
+    cmp rax, r15
+    cmova r15, rax
+    mov rax, [mdl+MD_F]
+    add rax, rax
+    cmp rax, r15
+    cmova r15, rax
+    imul r15, [mdl+MD_M]
+    xor esi, esi
+.mxb:
+    mov rcx, r15
+    test esi, 1
+    jz .mxq
+    shr rcx, 5
+.mxq:
+    call dalloc
+    lea rdx, [mxs0]             ; mxs2 follows it
+    mov [rdx+rsi*8], rax
+    inc esi
+    cmp esi, 8
+    jb .mxb
+.nomxbuf:
 
     ; pointer table, one entry per layer plus the final norm
     mov rcx, [mdl+MD_L]
@@ -1033,6 +1412,10 @@ model_cast:
     mov ecx, 4096               ; grid-stride
     shl ecx, 8
     call lin
+    cmp dword [mdl_fp8], 0
+    je .done
+    call quantw
+.done:
     add rsp, 40
     ret
 
@@ -1436,12 +1819,12 @@ model_fwd:
     mov r8, [rsi+LP_XN1]
     mov r9, [rsi+LP_RS1]
     call rmsnorm
-    MM [rsi+LP_XN1], [rsi+LP_WQKV], [rsi+LP_QKV], 0, [cur_m], [mdl+MD_QKV], [mdl+MD_D], [mmbf]
+    MM [rsi+LP_XN1], [rsi+LP_WQKV], [rsi+LP_QKV], 0, [cur_m], [mdl+MD_QKV], [mdl+MD_D], [mmbfx]
     mov rcx, [rsi+LP_QKV]
     xor edx, edx
     call rope
     call attn_fwd
-    MM [rsi+LP_Y], [rsi+LP_WO], [rsi+LP_X2], [rsi+LP_X], [cur_m], [mdl+MD_D], [mdl+MD_QD], 0
+    MM [rsi+LP_Y], [rsi+LP_WO], [rsi+LP_X2], [rsi+LP_X], [cur_m], [mdl+MD_D], [mdl+MD_QD], MM_X8
     mov rcx, [rsi+LP_X2]
     mov rdx, [rsi+LP_N2]
     mov r8, [rsi+LP_XN2]
@@ -1449,7 +1832,7 @@ model_fwd:
     call rmsnorm
     mov rdi, [mdl+MD_F]
     add rdi, rdi
-    MM [rsi+LP_XN2], [rsi+LP_W13], [rsi+LP_H], 0, [cur_m], rdi, [mdl+MD_D], [mmbf]
+    MM [rsi+LP_XN2], [rsi+LP_W13], [rsi+LP_H], 0, [cur_m], rdi, [mdl+MD_D], [mmbfx]
     KF k_swi
     karg 0, [rsi+LP_H]
     karg 1, [rsi+LP_G]
@@ -1460,7 +1843,7 @@ model_fwd:
     mov rcx, [cur_m]
     imul rcx, [mdl+MD_F]
     call lin
-    MM [rsi+LP_G], [rsi+LP_W2], [rsi+LP_SIZE+LP_X], [rsi+LP_X2], [cur_m], [mdl+MD_D], [mdl+MD_F], 0
+    MM [rsi+LP_G], [rsi+LP_W2], [rsi+LP_SIZE+LP_X], [rsi+LP_X2], [cur_m], [mdl+MD_D], [mdl+MD_F], MM_X8
     add rsi, LP_SIZE
     inc r13
     jmp .layer
@@ -1553,9 +1936,9 @@ model_bwd:
     js .embed
     ; mlp: x' = x2 + swiglu(norm(x2) W13^T) W2^T
     call fork
-    MM [d_drest], [rsi+LP_W2], [d_dg], 0, [cur_m], [mdl+MD_F], [mdl+MD_D], [mmbftb]
+    MM [d_drest], [rsi+LP_W2], [d_dg], 0, [cur_m], [mdl+MD_F], [mdl+MD_D], [mmbftbx]
     call on2
-    MM [d_drest], [rsi+LP_G], [rsi+LP_G2], [rsi+LP_G2], [mdl+MD_D], [mdl+MD_F], [cur_m], MM_TA|MM_TB
+    MM [d_drest], [rsi+LP_G], [rsi+LP_G2], [rsi+LP_G2], [mdl+MD_D], [mdl+MD_F], [cur_m], MM_TA|MM_TB|MM_X8
     lea rcx, [ev_drest]
     call back
     lea rcx, [ev_dh]
@@ -1574,9 +1957,9 @@ model_bwd:
     call fork
     lea rcx, [ev_dxn]
     call waitfor
-    MM [d_dh], [rsi+LP_W13], [d_dxn], 0, [cur_m], [mdl+MD_D], r14, MM_TB
+    MM [d_dh], [rsi+LP_W13], [d_dxn], 0, [cur_m], [mdl+MD_D], r14, MM_TB|MM_X8
     call on2
-    MM [d_dh], [rsi+LP_XN2], [rsi+LP_G13], [rsi+LP_G13], r14, [mdl+MD_D], [cur_m], MM_TA|MM_TB
+    MM [d_dh], [rsi+LP_XN2], [rsi+LP_G13], [rsi+LP_G13], r14, [mdl+MD_D], [cur_m], MM_TA|MM_TB|MM_X8
     lea rcx, [ev_dh]
     call back
     call fork
@@ -1593,9 +1976,9 @@ model_bwd:
 
     ; attention: x2 = x + attn(norm(x)) Wo^T
     call fork
-    MM [d_drest], [rsi+LP_WO], [d_dy], 0, [cur_m], [mdl+MD_QD], [mdl+MD_D], [mmbftb]
+    MM [d_drest], [rsi+LP_WO], [d_dy], 0, [cur_m], [mdl+MD_QD], [mdl+MD_D], [mmbftbx]
     call on2
-    MM [d_drest], [rsi+LP_Y], [rsi+LP_GO], [rsi+LP_GO], [mdl+MD_D], [mdl+MD_QD], [cur_m], MM_TA|MM_TB
+    MM [d_drest], [rsi+LP_Y], [rsi+LP_GO], [rsi+LP_GO], [mdl+MD_D], [mdl+MD_QD], [cur_m], MM_TA|MM_TB|MM_X8
     lea rcx, [ev_drest]
     call back
     lea rcx, [ev_dqkv]
@@ -1607,9 +1990,9 @@ model_bwd:
     call fork
     lea rcx, [ev_dxn]
     call waitfor
-    MM [d_dqkv], [rsi+LP_WQKV], [d_dxn], 0, [cur_m], [mdl+MD_D], [mdl+MD_QKV], MM_TB
+    MM [d_dqkv], [rsi+LP_WQKV], [d_dxn], 0, [cur_m], [mdl+MD_D], [mdl+MD_QKV], MM_TB|MM_X8
     call on2
-    MM [d_dqkv], [rsi+LP_XN1], [rsi+LP_GQKV], [rsi+LP_GQKV], [mdl+MD_QKV], [mdl+MD_D], [cur_m], MM_TA|MM_TB
+    MM [d_dqkv], [rsi+LP_XN1], [rsi+LP_GQKV], [rsi+LP_GQKV], [mdl+MD_QKV], [mdl+MD_D], [cur_m], MM_TA|MM_TB|MM_X8
     lea rcx, [ev_dqkv]
     call back
     call fork
@@ -1721,6 +2104,10 @@ model_step:
     mov ecx, 4096
     shl ecx, 8
     call lin
+    cmp dword [mdl_fp8], 0
+    je .done
+    call quantw
+.done:
     add rsp, 56
     pop rsi
     pop rbx

@@ -2,7 +2,7 @@
 
 extern model_config, model_setup, model_init, model_cast, model_fwd, model_bwd
 extern model_zero, model_step, model_sort, model_loss, model_summary
-extern mdl, mdl_fast, mdl_streams, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
+extern mdl, mdl_fast, mdl_streams, mdl_fp8, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
 extern k_f2bf, mm_ref_f, mm_tc_f
 
 ; mdl: the config plus everything derived from it. all u64
@@ -77,6 +77,7 @@ MM_TA     equ 1                 ; A stored [K][M]
 MM_TB     equ 2                 ; B stored [K][N]
 MM_BF     equ 4                 ; C is bf16
 MM_F32    equ 8                 ; A and B are f32 (mm_ref only)
+MM_X8     equ 16                ; may run in mxfp8 (with fp8=1). the other kernels ignore it
 
 ; model_step's settings, f64
 OP_LR     equ 0
