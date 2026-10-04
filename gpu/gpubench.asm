@@ -9,7 +9,7 @@ bits 64
 
 extern ExitProcess
 extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_bench, ptx_bench_end
-extern ptx_bench8, ptx_bench8_end, ptx_benchmx, ptx_benchmx_end
+extern ptx_bench8, ptx_bench8_end, ptx_benchmx, ptx_benchmx_end, ptx_mx, ptx_mx_end
 
 HOSTB  equ 256 << 20            ; pcie test size
 VRAMB  equ 512 << 20            ; each side of the vram copy
@@ -29,6 +29,7 @@ k_e4m3h  db "mma_e4m3h", 0
 k_mxf8   db "mma_mxf8", 0
 k_nvf4   db "mma_nvf4", 0
 k_mxf4   db "mma_mxf4", 0
+k_gmx    db "gemm_mx", 0
 align 8
 ; the tensor core rows: where the module is, kernel, flops per mma per warp, label.
 ; the first one is what the matmuls' "% of peak" means
@@ -106,6 +107,10 @@ f_tc     resq 1
 m_bf16   resq 1
 m_fp8    resq 1                 ; 0 if the jit wouldn't take it
 m_mx     resq 1
+f_gmx    resq 1                 ; gemm_mx, 0 without sm_120a
+gSA      resq 1                 ; its scales
+gSB      resq 1
+tbf      resq 20                ; bf16 ms per shape, for the mxfp8 rows
 s1       resq 1
 s2       resq 1
 gA       resq 1
@@ -180,6 +185,14 @@ start:
     sub rdx, rcx
     call gpu_module
     mov [m_mx], rax
+    lea rcx, [ptx_mx]
+    lea rdx, [ptx_mx_end]
+    sub rdx, rcx
+    call gpu_module
+    test rax, rax
+    jz .nogmx
+    getf rax, k_gmx, f_gmx
+.nogmx:
     mov dword [gpu_arch], 0
     mov dword [gpu_soft], 0
     lea rcx, [s1]
@@ -753,6 +766,15 @@ matmuls:
     mov edi, 5
     call timed
     call ptf
+    lea rax, [shapes]           ; keep the time for the mxfp8 rows: tbf + (rbx-shapes)/6
+    mov rcx, rbx
+    sub rcx, rax
+    mov eax, ecx
+    xor edx, edx
+    mov ecx, 6
+    div ecx
+    lea rcx, [tbf]
+    movsd [rcx+rax], xmm0
     ; add it into a whole forward pass, as many times as the model runs it
     cvtsi2sd xmm2, qword [rbx+32]
     mulsd xmm0, xmm2
@@ -793,6 +815,10 @@ matmuls:
     mov edx, 1
     call print_fixed
     say " hours of pure matmul", 13, 10
+    cmp qword [f_gmx], 0
+    je .nomx
+    call mxrows
+.nomx:
     mov rcx, [gA]
     call gpu_free
     mov rcx, [gW]
@@ -809,8 +835,130 @@ matmuls:
     pop rbx
     ret
 
-; esi = which (0 ref, 1 mma1, 2 tc), edi = runs, r12/r13/r14 = M/N/K, r15 = layout flags.
-; xmm0 = ms per run (after one warm up run)
+; ---- the same shapes in mxfp8 (gemm_mx). its operands are always k-major, the
+; scales are all 1.0, and gA/gW's bf16 patterns read as fine e4m3 bytes
+mxrows:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 48
+    say 13, 10, "matmul, mxfp8 (gemm_mx), C = A * W^T, e4m3 in, fp32 out", 13, 10
+    mov ecx, 32 << 20
+    call gpu_alloc
+    mov [gSA], rax
+    mov ecx, 32 << 20
+    call gpu_alloc
+    mov [gSB], rax
+    mov rcx, [gSA]
+    mov edx, 0x7f7f7f7f
+    mov r8d, (32 << 20) / 4
+    CU cuMemsetD32
+    mov rcx, [gSB]
+    mov edx, 0x7f7f7f7f
+    mov r8d, (32 << 20) / 4
+    CU cuMemsetD32
+    lea rbx, [shapes]
+    xor eax, eax
+    mov [mixt], rax
+    mov [mixf], rax
+    mov [rsp+40], rax           ; the bf16 ms of the same, for the total
+.s:
+    mov r12, [rbx]
+    test r12, r12
+    jz .done
+    mov r13, [rbx+8]
+    mov r14, [rbx+16]
+    mov r15, [rbx+40]
+    say "  "
+    mov rcx, [rbx+24]
+    call print_z
+    say "  "
+    mov esi, 3
+    mov edi, 5
+    call timed
+    movsd [rsp+32], xmm0
+    mov edx, 2
+    call print_fixed
+    say " ms  "
+    call flops
+    divsd xmm0, [rsp+32]
+    divsd xmm0, [c_1e9]
+    mov edx, 1
+    call print_fixed
+    say " TFLOPS  "
+    lea rax, [shapes]
+    mov rcx, rbx
+    sub rcx, rax
+    mov eax, ecx
+    xor edx, edx
+    mov ecx, 6
+    div ecx
+    lea rcx, [tbf]
+    movsd xmm0, [rcx+rax]
+    movsd xmm1, xmm0
+    cvtsi2sd xmm2, qword [rbx+32]
+    mulsd xmm1, xmm2
+    addsd xmm1, [rsp+40]
+    movsd [rsp+40], xmm1
+    divsd xmm0, [rsp+32]
+    mov edx, 2
+    call print_fixed
+    say "x bf16", 13, 10
+    movsd xmm0, [rsp+32]
+    cvtsi2sd xmm2, qword [rbx+32]
+    mulsd xmm0, xmm2
+    addsd xmm0, [mixt]
+    movsd [mixt], xmm0
+    call flops
+    cvtsi2sd xmm2, qword [rbx+32]
+    mulsd xmm0, xmm2
+    addsd xmm0, [mixf]
+    movsd [mixf], xmm0
+    add rbx, 48
+    jmp .s
+.done:
+    say 13, 10, "  all the matmuls of a training step of main in mxfp8: "
+    movsd xmm0, [mixf]
+    divsd xmm0, [mixt]
+    divsd xmm0, [c_1e9]
+    mov edx, 1
+    call print_fixed
+    say " TFLOPS, "
+    movsd xmm0, [rsp+40]
+    divsd xmm0, [mixt]
+    mov edx, 2
+    call print_fixed
+    say "x the bf16 ones", 13, 10
+    mov rcx, [gSA]
+    call gpu_free
+    mov rcx, [gSB]
+    call gpu_free
+    add rsp, 48
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; xmm0 = 2 M N K for r12/r13/r14
+flops:
+    cvtsi2sd xmm0, r12
+    cvtsi2sd xmm1, r13
+    mulsd xmm0, xmm1
+    cvtsi2sd xmm1, r14
+    mulsd xmm0, xmm1
+    addsd xmm0, xmm0
+    ret
+
+; esi = which (0 ref, 1 mma1, 2 tc, 3 mx), edi = runs, r12/r13/r14 = M/N/K, r15 = layout
+; flags. xmm0 = ms per run (after one warm up run)
 timed:
     push rbx
     sub rsp, 32
@@ -834,6 +982,8 @@ timed:
     mov dword [rbx+KL_GZ], 1
     mov dword [rbx+KL_BZ], 1
     mov qword [rbx+KL_STREAM], 0
+    cmp esi, 3
+    je .mx
     cmp esi, 1
     je .mma1
     ja .tc
@@ -863,6 +1013,38 @@ timed:
 .tc:
     mov rax, [f_tc]
     mov [rbx+KL_FUNC], rax
+    mov eax, r13d
+    shr eax, 7
+    mov [rbx+KL_GX], eax
+    mov eax, r12d
+    shr eax, 7
+    mov [rbx+KL_GY], eax
+    mov dword [rbx+KL_BX], 256
+    mov dword [rbx+KL_BY], 1
+    jmp .go
+.mx:
+    mov rax, [f_gmx]
+    mov [rbx+KL_FUNC], rax
+    mov rax, [gA]
+    mov [rbx+KL_ARGS], rax
+    mov rax, [gSA]
+    mov [rbx+KL_ARGS+8], rax
+    mov rax, [gW]
+    mov [rbx+KL_ARGS+16], rax
+    mov rax, [gSB]
+    mov [rbx+KL_ARGS+24], rax
+    mov rax, [gC]
+    mov [rbx+KL_ARGS+32], rax
+    mov [rbx+KL_ARGS+40], r12
+    mov [rbx+KL_ARGS+48], r13
+    mov [rbx+KL_ARGS+56], r14
+    xor eax, eax
+    test r15d, 1
+    jz .mxr
+    mov rax, [gC]               ; weight gradients add up
+.mxr:
+    mov [rbx+KL_ARGS+64], rax
+    mov qword [rbx+KL_ARGS+72], 0
     mov eax, r13d
     shr eax, 7
     mov [rbx+KL_GX], eax

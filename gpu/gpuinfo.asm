@@ -8,7 +8,7 @@ bits 64
 
 extern ExitProcess
 extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_bench, ptx_bench_end
-extern ptx_ops, ptx_ops_end, ptx_attn, ptx_attn_end
+extern ptx_ops, ptx_ops_end, ptx_attn, ptx_attn_end, ptx_mx, ptx_mx_end
 
 section .text
 
@@ -193,6 +193,22 @@ start:
     kinfo k_ffwd, 128
     kinfo k_fdq, 128
     kinfo k_fdkv, 128
+    ; mxfp8 needs sm_120a, skip it where the jit won't have it
+    mov dword [gpu_soft], 1
+    mov dword [gpu_arch], 1
+    lea rcx, [ptx_mx]
+    lea rdx, [ptx_mx_end]
+    sub rdx, rcx
+    call gpu_module
+    mov dword [gpu_arch], 0
+    mov dword [gpu_soft], 0
+    mov rbx, rax
+    test rbx, rbx
+    jz .nomx
+    kinfo k_mxq, 256
+    kinfo k_mmmx, 256
+    kinfo k_gmx, 256
+.nomx:
     call con_restore
     xor ecx, ecx
     call ExitProcess
@@ -342,6 +358,9 @@ k_adamw  db "adamw", 0
 k_ffwd   db "flash_fwd", 0
 k_fdq    db "flash_dq", 0
 k_fdkv   db "flash_dkv", 0
+k_mxq    db "mxq", 0
+k_mmmx   db "mm_mx", 0
+k_gmx    db "gemm_mx", 0
 section .text
 
 ; ecx = number, -1 prints as ?

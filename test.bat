@@ -4,7 +4,7 @@ rem builds every test program and every tool, then runs the self-checking tests
 pushd "%~dp0"
 set BAD=0
 
-for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu grad model infer asmdata) do (
+for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu mx grad model infer asmdata) do (
     call .\build.bat test\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 rem the tools too, so nothing rots unnoticed
@@ -47,6 +47,8 @@ echo == tokenizer
 bin\tok.exe || set BAD=1
 echo == gpu
 bin\gpu.exe || set BAD=1
+echo == mxfp8
+bin\mx.exe || set BAD=1
 echo == gradients
 bin\grad.exe || set BAD=1
 echo == fast kernels vs naive
