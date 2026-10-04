@@ -1,0 +1,226 @@
+// block-scaled versions of mma_peak (bench.ptx). these need the arch-specific
+// target (sm_120a), so gpubench loads them with gpu_arch set and lives without
+// them if the jit says no. every scale is 1.0 (ue8m0 0x7f, ue4m3 0x38), it's
+// the rate we're after.
+//   mxf8: e4m3 with a power-of-two scale per 32, m16n8k32 = 8192 flops per warp
+//   nvf4: e2m1 with an e4m3 scale per 16, m16n8k64 = 16384 flops per warp
+//   mxf4: e2m1 with a power-of-two scale per 32, m16n8k64 = 16384 flops per warp
+.visible .entry mma_mxf8(
+    .param .u64 pout,
+    .param .u32 piters,
+    .param .u64 pclk)
+{
+    .reg .pred  %p;
+    .reg .b16   %s<2>;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<40>;
+
+    ld.param.u64    %rd1, [pout];
+    ld.param.u32    %r1, [piters];
+    mov.u64         %rd4, %clock64;
+    mov.u64         %rd7, %globaltimer;
+    mov.u32         %r2, %tid.x;
+    and.b32         %r3, %r2, 7;
+    add.u32         %r3, %r3, 0x30303030;
+    add.u32         %r4, %r3, 0x01010101;
+    add.u32         %r5, %r3, 0x02020202;
+    add.u32         %r6, %r3, 0x03030303;
+    add.u32         %r7, %r3, 0x04040404;
+    add.u32         %r8, %r3, 0x05050505;
+    mov.b32         %r14, 0x7f7f7f7f;
+    mov.b32         %r15, 0x7f7f7f7f;
+    mov.b16         %s0, 0;
+    mov.f32 %f0, 0f00000000;   mov.f32 %f1, 0f00000000;   mov.f32 %f2, 0f00000000;   mov.f32 %f3, 0f00000000;
+    mov.f32 %f4, 0f00000000;   mov.f32 %f5, 0f00000000;   mov.f32 %f6, 0f00000000;   mov.f32 %f7, 0f00000000;
+    mov.f32 %f8, 0f00000000;   mov.f32 %f9, 0f00000000;   mov.f32 %f10, 0f00000000;  mov.f32 %f11, 0f00000000;
+    mov.f32 %f12, 0f00000000;  mov.f32 %f13, 0f00000000;  mov.f32 %f14, 0f00000000;  mov.f32 %f15, 0f00000000;
+    mov.f32 %f16, 0f00000000;  mov.f32 %f17, 0f00000000;  mov.f32 %f18, 0f00000000;  mov.f32 %f19, 0f00000000;
+    mov.f32 %f20, 0f00000000;  mov.f32 %f21, 0f00000000;  mov.f32 %f22, 0f00000000;  mov.f32 %f23, 0f00000000;
+    mov.f32 %f24, 0f00000000;  mov.f32 %f25, 0f00000000;  mov.f32 %f26, 0f00000000;  mov.f32 %f27, 0f00000000;
+    mov.f32 %f28, 0f00000000;  mov.f32 %f29, 0f00000000;  mov.f32 %f30, 0f00000000;  mov.f32 %f31, 0f00000000;
+    mov.u32         %r9, 0;
+loop:
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f0, %f1, %f2, %f3}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f0, %f1, %f2, %f3}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f4, %f5, %f6, %f7}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f4, %f5, %f6, %f7}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f8, %f9, %f10, %f11}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f8, %f9, %f10, %f11}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f12, %f13, %f14, %f15}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f12, %f13, %f14, %f15}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f16, %f17, %f18, %f19}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f16, %f17, %f18, %f19}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f20, %f21, %f22, %f23}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f20, %f21, %f22, %f23}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f24, %f25, %f26, %f27}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f24, %f25, %f26, %f27}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f28, %f29, %f30, %f31}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f28, %f29, %f30, %f31}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    add.u32         %r9, %r9, 1;
+    setp.lt.u32     %p, %r9, %r1;
+    @%p bra         loop;
+    mov.u64         %rd5, %clock64;
+    sub.u64         %rd5, %rd5, %rd4;
+    mov.u64         %rd4, %globaltimer;
+    sub.u64         %rd7, %rd4, %rd7;
+    mov.u32         %r13, %ctaid.x;
+    or.b32          %r13, %r13, %r2;
+    setp.ne.u32     %p, %r13, 0;
+    @%p bra         sum;
+    ld.param.u64    %rd6, [pclk];
+    st.global.u64   [%rd6], %rd5;
+    st.global.u64   [%rd6+8], %rd7;
+sum:
+    add.f32 %f32, %f0, %f4;    add.f32 %f33, %f8, %f12;   add.f32 %f34, %f16, %f20;  add.f32 %f35, %f24, %f28;
+    add.f32 %f32, %f32, %f1;   add.f32 %f33, %f33, %f9;   add.f32 %f34, %f34, %f17;  add.f32 %f35, %f35, %f25;
+    add.f32 %f32, %f32, %f33;
+    add.f32 %f34, %f34, %f35;
+    add.f32 %f36, %f32, %f34;
+    mov.u32         %r10, %ctaid.x;
+    mov.u32         %r11, %ntid.x;
+    mad.lo.u32      %r12, %r10, %r11, %r2;
+    mul.wide.u32    %rd2, %r12, 4;
+    add.u64         %rd3, %rd1, %rd2;
+    st.global.f32   [%rd3], %f36;
+    ret;
+}
+
+.visible .entry mma_nvf4(
+    .param .u64 pout,
+    .param .u32 piters,
+    .param .u64 pclk)
+{
+    .reg .pred  %p;
+    .reg .b16   %s<2>;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<40>;
+
+    ld.param.u64    %rd1, [pout];
+    ld.param.u32    %r1, [piters];
+    mov.u64         %rd4, %clock64;
+    mov.u64         %rd7, %globaltimer;
+    mov.u32         %r2, %tid.x;
+    // e2m1 nibbles, 0x2 is 1.0
+    and.b32         %r3, %r2, 7;
+    add.u32         %r3, %r3, 0x22222220;
+    add.u32         %r4, %r3, 0x01000000;
+    add.u32         %r5, %r3, 0x00100000;
+    add.u32         %r6, %r3, 0x00010000;
+    add.u32         %r7, %r3, 0x00001000;
+    add.u32         %r8, %r3, 0x00000100;
+    mov.b32         %r14, 0x38383838;
+    mov.b32         %r15, 0x38383838;
+    mov.b16         %s0, 0;
+    mov.f32 %f0, 0f00000000;   mov.f32 %f1, 0f00000000;   mov.f32 %f2, 0f00000000;   mov.f32 %f3, 0f00000000;
+    mov.f32 %f4, 0f00000000;   mov.f32 %f5, 0f00000000;   mov.f32 %f6, 0f00000000;   mov.f32 %f7, 0f00000000;
+    mov.f32 %f8, 0f00000000;   mov.f32 %f9, 0f00000000;   mov.f32 %f10, 0f00000000;  mov.f32 %f11, 0f00000000;
+    mov.f32 %f12, 0f00000000;  mov.f32 %f13, 0f00000000;  mov.f32 %f14, 0f00000000;  mov.f32 %f15, 0f00000000;
+    mov.f32 %f16, 0f00000000;  mov.f32 %f17, 0f00000000;  mov.f32 %f18, 0f00000000;  mov.f32 %f19, 0f00000000;
+    mov.f32 %f20, 0f00000000;  mov.f32 %f21, 0f00000000;  mov.f32 %f22, 0f00000000;  mov.f32 %f23, 0f00000000;
+    mov.f32 %f24, 0f00000000;  mov.f32 %f25, 0f00000000;  mov.f32 %f26, 0f00000000;  mov.f32 %f27, 0f00000000;
+    mov.f32 %f28, 0f00000000;  mov.f32 %f29, 0f00000000;  mov.f32 %f30, 0f00000000;  mov.f32 %f31, 0f00000000;
+    mov.u32         %r9, 0;
+loop:
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f0, %f1, %f2, %f3}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f0, %f1, %f2, %f3}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f4, %f5, %f6, %f7}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f4, %f5, %f6, %f7}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f8, %f9, %f10, %f11}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f8, %f9, %f10, %f11}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f12, %f13, %f14, %f15}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f12, %f13, %f14, %f15}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f16, %f17, %f18, %f19}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f16, %f17, %f18, %f19}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f20, %f21, %f22, %f23}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f20, %f21, %f22, %f23}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f24, %f25, %f26, %f27}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f24, %f25, %f26, %f27}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 {%f28, %f29, %f30, %f31}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f28, %f29, %f30, %f31}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    add.u32         %r9, %r9, 1;
+    setp.lt.u32     %p, %r9, %r1;
+    @%p bra         loop;
+    mov.u64         %rd5, %clock64;
+    sub.u64         %rd5, %rd5, %rd4;
+    mov.u64         %rd4, %globaltimer;
+    sub.u64         %rd7, %rd4, %rd7;
+    mov.u32         %r13, %ctaid.x;
+    or.b32          %r13, %r13, %r2;
+    setp.ne.u32     %p, %r13, 0;
+    @%p bra         sum;
+    ld.param.u64    %rd6, [pclk];
+    st.global.u64   [%rd6], %rd5;
+    st.global.u64   [%rd6+8], %rd7;
+sum:
+    add.f32 %f32, %f0, %f4;    add.f32 %f33, %f8, %f12;   add.f32 %f34, %f16, %f20;  add.f32 %f35, %f24, %f28;
+    add.f32 %f32, %f32, %f1;   add.f32 %f33, %f33, %f9;   add.f32 %f34, %f34, %f17;  add.f32 %f35, %f35, %f25;
+    add.f32 %f32, %f32, %f33;
+    add.f32 %f34, %f34, %f35;
+    add.f32 %f36, %f32, %f34;
+    mov.u32         %r10, %ctaid.x;
+    mov.u32         %r11, %ntid.x;
+    mad.lo.u32      %r12, %r10, %r11, %r2;
+    mul.wide.u32    %rd2, %r12, 4;
+    add.u64         %rd3, %rd1, %rd2;
+    st.global.f32   [%rd3], %f36;
+    ret;
+}
+
+.visible .entry mma_mxf4(
+    .param .u64 pout,
+    .param .u32 piters,
+    .param .u64 pclk)
+{
+    .reg .pred  %p;
+    .reg .b16   %s<2>;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<40>;
+
+    ld.param.u64    %rd1, [pout];
+    ld.param.u32    %r1, [piters];
+    mov.u64         %rd4, %clock64;
+    mov.u64         %rd7, %globaltimer;
+    mov.u32         %r2, %tid.x;
+    and.b32         %r3, %r2, 7;
+    add.u32         %r3, %r3, 0x22222220;
+    add.u32         %r4, %r3, 0x01000000;
+    add.u32         %r5, %r3, 0x00100000;
+    add.u32         %r6, %r3, 0x00010000;
+    add.u32         %r7, %r3, 0x00001000;
+    add.u32         %r8, %r3, 0x00000100;
+    mov.b32         %r14, 0x7f7f7f7f;
+    mov.b32         %r15, 0x7f7f7f7f;
+    mov.b16         %s0, 0;
+    mov.f32 %f0, 0f00000000;   mov.f32 %f1, 0f00000000;   mov.f32 %f2, 0f00000000;   mov.f32 %f3, 0f00000000;
+    mov.f32 %f4, 0f00000000;   mov.f32 %f5, 0f00000000;   mov.f32 %f6, 0f00000000;   mov.f32 %f7, 0f00000000;
+    mov.f32 %f8, 0f00000000;   mov.f32 %f9, 0f00000000;   mov.f32 %f10, 0f00000000;  mov.f32 %f11, 0f00000000;
+    mov.f32 %f12, 0f00000000;  mov.f32 %f13, 0f00000000;  mov.f32 %f14, 0f00000000;  mov.f32 %f15, 0f00000000;
+    mov.f32 %f16, 0f00000000;  mov.f32 %f17, 0f00000000;  mov.f32 %f18, 0f00000000;  mov.f32 %f19, 0f00000000;
+    mov.f32 %f20, 0f00000000;  mov.f32 %f21, 0f00000000;  mov.f32 %f22, 0f00000000;  mov.f32 %f23, 0f00000000;
+    mov.f32 %f24, 0f00000000;  mov.f32 %f25, 0f00000000;  mov.f32 %f26, 0f00000000;  mov.f32 %f27, 0f00000000;
+    mov.f32 %f28, 0f00000000;  mov.f32 %f29, 0f00000000;  mov.f32 %f30, 0f00000000;  mov.f32 %f31, 0f00000000;
+    mov.u32         %r9, 0;
+loop:
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f0, %f1, %f2, %f3}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f0, %f1, %f2, %f3}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f4, %f5, %f6, %f7}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f4, %f5, %f6, %f7}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f8, %f9, %f10, %f11}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f8, %f9, %f10, %f11}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f12, %f13, %f14, %f15}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f12, %f13, %f14, %f15}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f16, %f17, %f18, %f19}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f16, %f17, %f18, %f19}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f20, %f21, %f22, %f23}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f20, %f21, %f22, %f23}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f24, %f25, %f26, %f27}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f24, %f25, %f26, %f27}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 {%f28, %f29, %f30, %f31}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f28, %f29, %f30, %f31}, {%r14}, {%s0, %s0}, {%r15}, {%s0, %s0};
+    add.u32         %r9, %r9, 1;
+    setp.lt.u32     %p, %r9, %r1;
+    @%p bra         loop;
+    mov.u64         %rd5, %clock64;
+    sub.u64         %rd5, %rd5, %rd4;
+    mov.u64         %rd4, %globaltimer;
+    sub.u64         %rd7, %rd4, %rd7;
+    mov.u32         %r13, %ctaid.x;
+    or.b32          %r13, %r13, %r2;
+    setp.ne.u32     %p, %r13, 0;
+    @%p bra         sum;
+    ld.param.u64    %rd6, [pclk];
+    st.global.u64   [%rd6], %rd5;
+    st.global.u64   [%rd6+8], %rd7;
+sum:
+    add.f32 %f32, %f0, %f4;    add.f32 %f33, %f8, %f12;   add.f32 %f34, %f16, %f20;  add.f32 %f35, %f24, %f28;
+    add.f32 %f32, %f32, %f1;   add.f32 %f33, %f33, %f9;   add.f32 %f34, %f34, %f17;  add.f32 %f35, %f35, %f25;
+    add.f32 %f32, %f32, %f33;
+    add.f32 %f34, %f34, %f35;
+    add.f32 %f36, %f32, %f34;
+    mov.u32         %r10, %ctaid.x;
+    mov.u32         %r11, %ntid.x;
+    mad.lo.u32      %r12, %r10, %r11, %r2;
+    mul.wide.u32    %rd2, %r12, 4;
+    add.u64         %rd3, %rd1, %rd2;
+    st.global.f32   [%rd3], %f36;
+    ret;
+}

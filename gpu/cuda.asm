@@ -104,7 +104,9 @@ table:
 %unmacro F 2
 
 global gpu_dev, gpu_name, gpu_ccmaj, gpu_ccmin, gpu_nsm, gpu_vram, gpu_drv, gpu_verbose
-global gpu_ptxver, gpu_target
+global gpu_ptxver, gpu_target, gpu_soft, gpu_arch
+gpu_soft    resd 1              ; 1 = a module the jit refuses comes back as 0 instead of killing us
+gpu_arch    resd 1              ; 1 = the arch-specific target (sm_120a), for block-scaled mma
 gpu_dev     resd 1
 gpu_ccmaj   resd 1
 gpu_ccmin   resd 1
@@ -349,6 +351,11 @@ gpu_module:
     mov rcx, rax
     lea rdx, [gpu_target]
     call fmt_str
+    cmp dword [gpu_arch], 0
+    je .gen
+    mov byte [rax], 'a'
+    inc rax
+.gen:
     mov rcx, rax
     lea rdx, [h_addr]
     call fmt_str
@@ -387,6 +394,9 @@ gpu_module:
     call print_z
     lea rcx, [errlog]
     call print_z
+    mov qword [rsp+40], 0
+    cmp dword [gpu_soft], 0
+    jne .quiet
     mov ecx, [rsp+48]
     lea rdx, [s_load]
     call cu_fail

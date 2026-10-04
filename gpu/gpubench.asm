@@ -1,5 +1,6 @@
 ; gpubench: how fast this gpu is for us. pcie, vram, launches, copy/compute
-; overlap, tensor core peak, and the matmul on the shapes the model will use
+; overlap, tensor core peaks (bf16, fp8, fp4), and the matmul on the shapes the
+; model will use
 ; uses: gpu\cuda gpu\kernels
 default rel
 bits 64
@@ -8,6 +9,7 @@ bits 64
 
 extern ExitProcess
 extern ptx_basic, ptx_basic_end, ptx_gemm, ptx_gemm_end, ptx_bench, ptx_bench_end
+extern ptx_bench8, ptx_bench8_end, ptx_benchmx, ptx_benchmx_end
 
 HOSTB  equ 256 << 20            ; pcie test size
 VRAMB  equ 512 << 20            ; each side of the vram copy
@@ -22,6 +24,28 @@ k_ref    db "gemm_ref", 0
 k_mma1   db "gemm_mma1", 0
 k_tc     db "gemm_tc", 0
 k_peak   db "mma_peak", 0
+k_e4m3   db "mma_e4m3", 0
+k_e4m3h  db "mma_e4m3h", 0
+k_mxf8   db "mma_mxf8", 0
+k_nvf4   db "mma_nvf4", 0
+k_mxf4   db "mma_mxf4", 0
+align 8
+; the tensor core rows: where the module is, kernel, flops per mma per warp, label.
+; the first one is what the matmuls' "% of peak" means
+mmas:
+    dq m_bf16, k_peak, 4096, t_bf16
+    dq m_fp8, k_e4m3, 8192, t_e4m3
+    dq m_fp8, k_e4m3h, 8192, t_e4m3h
+    dq m_mx, k_mxf8, 8192, t_mxf8
+    dq m_mx, k_nvf4, 16384, t_nvf4
+    dq m_mx, k_mxf4, 16384, t_mxf4
+    dq 0
+t_bf16  db "bf16  -> f32  m16n8k16  ", 0
+t_e4m3  db "e4m3  -> f32  m16n8k32  ", 0
+t_e4m3h db "e4m3  -> f16  m16n8k32  ", 0
+t_mxf8  db "mxfp8 -> f32  m16n8k32  ", 0
+t_nvf4  db "nvfp4 -> f32  m16n8k64  ", 0
+t_mxf4  db "mxfp4 -> f32  m16n8k64  ", 0
 align 8
 c_1e3    dq 1000.0
 c_1e9    dq 1e9
@@ -79,7 +103,9 @@ f_empty  resq 1
 f_ref    resq 1
 f_mma1   resq 1
 f_tc     resq 1
-f_peak   resq 1
+m_bf16   resq 1
+m_fp8    resq 1                 ; 0 if the jit wouldn't take it
+m_mx     resq 1
 s1       resq 1
 s2       resq 1
 gA       resq 1
@@ -140,7 +166,22 @@ start:
     lea rdx, [ptx_bench_end]
     sub rdx, rcx
     call gpu_module
-    getf rax, k_peak, f_peak
+    mov [m_bf16], rax
+    ; fp8 needs sm_89, the block-scaled ones sm_120a. go on without them if need be
+    mov dword [gpu_soft], 1
+    lea rcx, [ptx_bench8]
+    lea rdx, [ptx_bench8_end]
+    sub rdx, rcx
+    call gpu_module
+    mov [m_fp8], rax
+    mov dword [gpu_arch], 1
+    lea rcx, [ptx_benchmx]
+    lea rdx, [ptx_benchmx_end]
+    sub rdx, rcx
+    call gpu_module
+    mov [m_mx], rax
+    mov dword [gpu_arch], 0
+    mov dword [gpu_soft], 0
     lea rcx, [s1]
     mov edx, 1                  ; CU_STREAM_NON_BLOCKING
     CU cuStreamCreate
@@ -535,32 +576,47 @@ pms:
     add rsp, 40
     ret
 
-; ---- tensor core peak: mma_peak, exactly one full wave of blocks on every SM
+; ---- tensor core peaks, a row per mma type. exactly one full wave of blocks on
+; every SM, and every warp keeps 8 mma chains going without touching memory
 PITERS equ 40000
 tensor:
     push rbx
-    push rsi
+    push rdi
+    push r12
+    push r13
     sub rsp, 72
-    say 13, 10, "tensor cores, bf16 in / fp32 accumulate (mma.sync.m16n8k16)", 13, 10
+    say 13, 10, "tensor cores, peak per mma.sync type", 13, 10
     mov ecx, 4 << 20
     call gpu_alloc
-    mov [rsp+32], rax
+    mov r12, rax
+    lea rdi, [mmas]
+.row:
+    cmp qword [rdi], 0
+    je .done
+    say "  "
+    mov rcx, [rdi+24]
+    call print_z
+    mov rax, [rdi]
+    mov rcx, [rax]
+    test rcx, rcx
+    jz .no
+    mov rdx, [rdi+8]
+    call gpu_func
+    lea rbx, [kl]
+    mov [rbx+KL_FUNC], rax
     lea rcx, [rsp+64]
-    mov rdx, [f_peak]
+    mov rdx, rax
     mov r8d, 256
     xor r9d, r9d
     CU cuOccupancy
-    mov esi, [rsp+64]
-    imul esi, [gpu_nsm]         ; blocks, all resident at once
-    lea rbx, [kl]
-    mov rax, [f_peak]
-    mov [rbx+KL_FUNC], rax
-    grid esi, 1, 256, 1
-    mov rax, [rsp+32]
-    mov [rbx+KL_ARGS], rax
+    mov r13d, [rsp+64]
+    imul r13d, [gpu_nsm]        ; blocks, all resident at once
+    grid r13d, 1, 256, 1
+    mov [rbx+KL_ARGS], r12
     mov qword [rbx+KL_ARGS+8], 1000
-    add rax, 3 << 20            ; the clock count goes here
+    lea rax, [r12 + (3 << 20)]  ; the clock count goes here
     mov [rbx+KL_ARGS+16], rax
+    mov qword [rbx+KL_STREAM], 0
     mov rcx, rbx
     call gpu_launch             ; warm up (and let the clocks come up)
     call gpu_sync
@@ -571,50 +627,64 @@ tensor:
     call gpu_launch
     xor ecx, ecx
     call gpu_tstop
-    movsd [rsp+40], xmm0        ; ms
-    ; flops = blocks * 8 warps * iters * 8 mma * 4096
-    cvtsi2sd xmm1, rsi
-    mov rax, 8 * 8 * 4096 * PITERS
+    ; flops = blocks * 8 warps * iters * 8 mma * flops per mma
+    cvtsi2sd xmm1, r13
+    mov rax, [rdi+16]
+    imul rax, rax, 8 * 8 * PITERS
     cvtsi2sd xmm2, rax
     mulsd xmm1, xmm2
     divsd xmm0, [c_1e3]
     divsd xmm1, xmm0
     divsd xmm1, [c_1e12]
+    movsd [rsp+56], xmm1
+    cmp qword [peak], 0
+    jne .p
     movsd [peak], xmm1
-    say "  peak: "
-    movsd xmm0, [peak]
+.p:
+    movsd xmm0, [rsp+56]
     mov edx, 1
     call print_fixed
-    say " TFLOPS", 13, 10
-    ; the sm clock it actually ran at: one thread's cycles over its own nanoseconds
-    lea rcx, [rsp+48]
-    mov rdx, [rsp+32]
-    add rdx, 3 << 20
-    mov r8d, 16
-    call gpu_down
-    cvtsi2sd xmm0, qword [rsp+48]
-    cvtsi2sd xmm1, qword [rsp+56]
-    divsd xmm0, xmm1
-    movsd [rsp+40], xmm0        ; ghz
-    say "  it ran at "
-    movsd xmm0, [rsp+40]
+    say " TFLOPS  "
+    movsd xmm0, [rsp+56]
+    divsd xmm0, [peak]
     mov edx, 2
     call print_fixed
-    say " GHz, so the tensor cores do "
-    ; per SM per clock, which is the tensor core width
-    movsd xmm0, [peak]
+    say "x  at "
+    ; the sm clock it actually ran at: one thread's cycles over its own nanoseconds
+    lea rcx, [rsp+32]
+    lea rdx, [r12 + (3 << 20)]
+    mov r8d, 16
+    call gpu_down
+    cvtsi2sd xmm0, qword [rsp+32]
+    cvtsi2sd xmm1, qword [rsp+40]
+    divsd xmm0, xmm1
+    movsd [rsp+48], xmm0        ; ghz
+    mov edx, 2
+    call print_fixed
+    say " GHz = "
+    ; per SM per clock, which is the tensor core width for this type
+    movsd xmm0, [rsp+56]
     mulsd xmm0, [c_1e3]         ; tflops / ghz = kflops per clock
-    divsd xmm0, [rsp+40]
+    divsd xmm0, [rsp+48]
     mov eax, [gpu_nsm]
     cvtsi2sd xmm1, rax
     divsd xmm0, xmm1
     mov edx, 0
     call print_fixed
     say " flops per SM per clock", 13, 10
-    mov rcx, [rsp+32]
+    jmp .next
+.no:
+    say "the jit won't take it here", 13, 10
+.next:
+    add rdi, 32
+    jmp .row
+.done:
+    mov rcx, r12
     call gpu_free
     add rsp, 72
-    pop rsi
+    pop r13
+    pop r12
+    pop rdi
     pop rbx
     ret
 
