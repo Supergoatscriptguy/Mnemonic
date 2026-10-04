@@ -14,6 +14,14 @@ perm     dd 0, 4, 1, 5, 2, 6, 3, 7  ; undoes the lane order of the two packs
 c127     dd 127.0
 c7       dd 7.0
 c1       dd 1.0
+align 16
+signbit  times 4 dd 0x80000000
+m8x4     times 4 dd -8.0
+p7x4     times 4 dd 7.0
+i8x4     times 4 dd 8
+; q4_row_fit's tries: the biggest weight at about -fitc
+fitc     dd 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9, 8.0, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9
+NFIT     equ 19
 
 section .text
 
@@ -140,6 +148,151 @@ q4_row:
     jmp .g
 .done:
     add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; L for 4 weights at %1 with xmm0 = 1/scale: round, clamp to -8..7, in %2
+%macro q4l 2
+    movups %2, %1
+    mulps %2, xmm0
+    roundps %2, %2, 0
+    maxps %2, [m8x4]
+    minps %2, [p7x4]
+%endmacro
+
+; same as q4_row, but each group's scale is searched for instead of max/7: 19 tries
+; that put the biggest weight at about -8 (so all 16 levels get used) plus q4_row's
+; own, each refit by least squares (d = sum xq / sum q^2), and the one that leaves
+; the least squared error wins. the format doesn't change, only the scales and q
+global q4_row_fit
+q4_row_fit:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub rsp, 136
+    mov rsi, rcx
+    mov rdi, r8
+    mov r12, r9
+    mov rbx, rdx
+    shr rbx, 5
+.g:
+    test rbx, rbx
+    jz .done
+    ; the weight with the biggest magnitude, and its sign
+    xorps xmm0, xmm0
+    xorps xmm1, xmm1
+    xor eax, eax
+.m:
+    movss xmm2, [rsi+rax*4]
+    movss xmm3, xmm2
+    andps xmm3, [absmask]
+    comiss xmm3, xmm0
+    jbe .mn
+    movss xmm0, xmm3
+    movss xmm1, xmm2
+.mn:
+    inc eax
+    cmp eax, 32
+    jb .m
+    movss [rsp+48], xmm0        ; max |x|
+    movss [rsp+44], xmm1        ; that x
+    xorps xmm2, xmm2
+    comiss xmm0, xmm2
+    ja .search
+    mov dword [r12], 0
+    mov rax, 0x8888888888888888 ; all zero
+    mov [rdi], rax
+    mov [rdi+8], rax
+    jmp .next
+.search:
+    mov dword [rsp+32], 0       ; the best try so far takes away this much error
+    xor r10d, r10d
+.try:
+    cmp r10d, NFIT
+    ja .best
+    jb .fit
+    movss xmm0, [c7]            ; the last try is q4_row's 7 / max |x|
+    divss xmm0, [rsp+48]
+    jmp .go
+.fit:
+    lea rax, [fitc]
+    movss xmm0, [rax+r10*4]
+    xorps xmm0, [signbit]
+    divss xmm0, [rsp+44]
+.go:
+    movss [rsp+52], xmm0
+    shufps xmm0, xmm0, 0
+    xorps xmm1, xmm1            ; sum x q
+    xorps xmm2, xmm2            ; sum q^2
+%assign i 0
+%rep 8
+    movups xmm3, [rsi+i*16]
+    q4l [rsi+i*16], xmm4
+    mulps xmm3, xmm4
+    addps xmm1, xmm3
+    mulps xmm4, xmm4
+    addps xmm2, xmm4
+%assign i i+1
+%endrep
+    haddps xmm1, xmm1
+    haddps xmm1, xmm1
+    haddps xmm2, xmm2
+    haddps xmm2, xmm2
+    xorps xmm3, xmm3
+    comiss xmm2, xmm3
+    jbe .tn
+    ; with d = sum xq / sum q^2 the error is sum x^2 - (sum xq)^2 / sum q^2
+    movss xmm3, xmm1
+    mulss xmm3, xmm1
+    divss xmm3, xmm2
+    comiss xmm3, [rsp+32]
+    jbe .tn
+    movss [rsp+32], xmm3
+    mov eax, [rsp+52]
+    mov [rsp+36], eax
+    divss xmm1, xmm2
+    movss [rsp+40], xmm1
+.tn:
+    inc r10d
+    jmp .try
+.best:
+    movss xmm0, [rsp+36]
+    shufps xmm0, xmm0, 0
+    mov eax, [rsp+40]
+    mov [r12], eax
+    ; q + 8 in nibbles: byte j holds weights j (low) and j + 16 (high)
+%assign i 0
+%rep 4
+    q4l [rsi+i*16], xmm1
+    cvtps2dq xmm1, xmm1
+    paddd xmm1, [i8x4]
+    q4l [rsi+64+i*16], xmm2
+    cvtps2dq xmm2, xmm2
+    paddd xmm2, [i8x4]
+    pslld xmm2, 4
+    por xmm1, xmm2
+    movups [rsp+64+i*16], xmm1
+%assign i i+1
+%endrep
+    xor eax, eax
+.pk:
+    mov ecx, [rsp+64+rax*4]
+    mov [rdi+rax], cl
+    inc eax
+    cmp eax, 16
+    jb .pk
+.next:
+    add rsi, 128
+    add rdi, 16
+    add r12, 4
+    dec rbx
+    jmp .g
+.done:
+    add rsp, 136
+    pop r12
     pop rdi
     pop rsi
     pop rbx

@@ -1,7 +1,7 @@
 ; cpu inference: the model file, the matrices in memory, the engine.
 ; include after lib.inc
 
-extern mf_size, q8_row, q4_row, qx_vec
+extern mf_size, q8_row, q4_row, q4_row_fit, qx_vec
 extern kern_pick, kern_set, kern_name, mv_run, exp8
 extern eng_load, eng_reset, eng_step, eng_nll, eng, eng_mx
 extern samp_pick, samp_temp, samp_topp

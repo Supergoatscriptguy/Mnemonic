@@ -37,6 +37,9 @@ m_ref8   db "q8 matvec = the same integer math in f64 (max rel diff)", 0
 m_ref4   db "q4 matvec = the same integer math in f64 (max rel diff)", 0
 m_err8   db "q8 against the f32 product (quantization error, relative)", 0
 m_err4   db "q4 against the f32 product (quantization error, relative)", 0
+m_ref4f  db "q4, fitted scales: = the same integer math in f64 (max rel diff)", 0
+m_err4f  db "q4, fitted scales: against the f32 product (relative)", 0
+m_sse4f  db "q4, fitted scales: squared weight error / max/7's", 0
 m_exp    db "exp8 against x87 exp, -20..20 (max rel err)", 0
 m_fwd    db "cpu forward (f32, kv cache) = gpu forward, max |diff| / max |logit|", 0
 
@@ -52,6 +55,9 @@ q8m      resb MX_SIZE
 q4m      resb MX_SIZE
 q8buf    resq 1
 q4buf    resq 1
+q4fm     resb MX_SIZE
+q4fbuf   resq 1
+sse4     resq 1
 xq       resb C
 xs       resd C / 32
 paths    resq 1                 ; how many paths this cpu has (1..3)
@@ -197,6 +203,19 @@ t_matvec:
     mov edx, C
     mov r8d, QT_Q4
     call eng_mx
+    mov ecx, R
+    mov edx, C
+    mov r8d, QT_Q4
+    call mf_size
+    mov rcx, rax
+    call mem_alloc
+    mov [q4fbuf], rax
+    lea rdi, [q4fm]
+    mov rsi, rax
+    mov ecx, R
+    mov edx, C
+    mov r8d, QT_Q4
+    call eng_mx
     xor ebx, ebx
 .qr:
     imul ecx, ebx, C
@@ -217,6 +236,15 @@ t_matvec:
     imul r9d, ebx, C / 32 * 4
     add r9, [q4m+MX_S]
     call q4_row
+    imul ecx, ebx, C
+    shl rcx, 2
+    add rcx, [w]
+    mov edx, C
+    imul r8d, ebx, C / 2
+    add r8, [q4fm+MX_Q]
+    imul r9d, ebx, C / 32 * 4
+    add r9, [q4fm+MX_S]
+    call q4_row_fit
     inc ebx
     cmp ebx, R
     jb .qr
@@ -250,6 +278,46 @@ t_matvec:
     lea r8, [c_q4tol]
     lea rdx, [m_err4]
     call cmpf32
+    ; the same on the fitted scales, which also use -8 (nibble 0) and negative scales
+    lea rcx, [q4fm]
+    call allpaths
+    check e, "q4, fitted scales: every dot product path gives the same bits"
+    lea rcx, [q4fm]
+    call exact
+    lea rdx, [m_ref4f]
+    lea r8, [c_tol]
+    call cmpref
+    lea r8, [c_q4tol]
+    lea rdx, [m_err4f]
+    call cmpf32
+    mov rsi, [q4fm+MX_Q]
+    xor ecx, ecx
+    xor eax, eax
+.n0:
+    movzx edx, byte [rsi+rcx]
+    test dl, 0x0f
+    setz r8b
+    or al, r8b
+    test dl, 0xf0
+    setz r8b
+    or al, r8b
+    inc ecx
+    cmp ecx, R * C / 2
+    jb .n0
+    cmp al, 1
+    check e, "q4, fitted scales: -8 gets used"
+    lea rcx, [q4m]
+    call q4sse
+    movsd [sse4], xmm0
+    lea rcx, [q4fm]
+    call q4sse
+    movapd xmm2, xmm0
+    divsd xmm2, [sse4]
+    xor ecx, ecx
+    comisd xmm0, [sse4]
+    setb cl
+    lea rdx, [m_sse4f]
+    call t_okf
     add rsp, 40
     pop r12
     pop rdi
@@ -257,6 +325,52 @@ t_matvec:
     pop rbx
     ret
 
+; rcx = an int4 matrix of w. xmm0 = sum of (w - its int4 value)^2, in f64
+q4sse:
+    push rbx
+    push rsi
+    push rdi
+    mov rsi, [rcx+MX_Q]
+    mov rdi, [rcx+MX_S]
+    mov r8, [w]
+    xorpd xmm0, xmm0
+    xor ebx, ebx
+.g:
+    cmp ebx, R * C / 32
+    jae .r
+    movss xmm1, [rdi+rbx*4]
+    cvtss2sd xmm1, xmm1
+    xor ecx, ecx
+.e:
+    mov eax, ecx
+    and eax, 15
+    movzx edx, byte [rsi+rax]
+    cmp ecx, 16
+    jb .lo
+    shr edx, 4
+.lo:
+    and edx, 15
+    sub edx, 8
+    cvtsi2sd xmm2, edx
+    mulsd xmm2, xmm1
+    mov eax, ebx
+    shl eax, 5
+    add eax, ecx
+    cvtss2sd xmm3, [r8+rax*4]
+    subsd xmm3, xmm2
+    mulsd xmm3, xmm3
+    addsd xmm0, xmm3
+    inc ecx
+    cmp ecx, 32
+    jb .e
+    add rsi, 16
+    inc ebx
+    jmp .g
+.r:
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
 ; rcx = matrix. mv_run on every path into y[path], zf set if they all match path 0
 allpaths:
     push rbx

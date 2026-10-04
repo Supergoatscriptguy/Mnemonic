@@ -1,7 +1,7 @@
-; quantize checkpoint.ckpt out.mnm [q8|q4|f32] [rope_base=10000] [tok=datasets\tokenizer.bin]
+; quantize checkpoint.ckpt out.mnm [q8|q4|f32] [rope_base=10000] [tok=datasets\tokenizer.bin] [fit=1]
 ; a training checkpoint -> a model file for the cpu (chat/model.inc): the f32
 ; weights, int8 with a scale per row, or int4 with a scale per group of 32.
-; the norm weights stay f32
+; the norm weights stay f32. fit=1 searches each int4 group's scale (q4_row_fit)
 ; uses: chat\quant tokenizer\tok tokenizer\pretok
 default rel
 bits 64
@@ -15,6 +15,7 @@ extern ExitProcess
 section .rdata
 k_rope   db "rope_base", 0
 k_tok    db "tok", 0
+k_fit    db "fit", 0
 d_tok    db "datasets\tokenizer.bin", 0
 e_usage  db "usage: quantize checkpoint.ckpt out.mnm [q8|q4|f32]", 0
 e_ckpt   db "not a checkpoint: ", 0
@@ -43,6 +44,7 @@ F        resq 1
 V        resq 1
 QKV      resq 1
 QD       resq 1
+q4fn     resq 1                 ; q4_row, or q4_row_fit
 
 section .text
 
@@ -72,6 +74,14 @@ start:
     mov qword [qt], QT_F32
 .typed:
     call cfg_args
+    lea rcx, [k_fit]
+    xor edx, edx
+    call cfg_int
+    lea rdx, [q4_row]
+    lea r8, [q4_row_fit]
+    test rax, rax
+    cmovnz rdx, r8
+    mov [q4fn], rdx
     mov rcx, [argv+8]
     call file_map
     test rax, rax
@@ -336,7 +346,7 @@ mat:
     imul r9, r13
     shr r9, 3                   ; row * groups * 4
     add r9, rbx
-    call q4_row
+    call [q4fn]
 .rn:
     inc rdi
     jmp .r
