@@ -466,8 +466,12 @@ done:
 // the fast one: gemm_tc (gemm.ptx) for fp8. a block does 128x128 of C, going
 // through K 64 at a time. that's 64 bytes a row, like gemm_tc's 32 bf16, and an
 // m16n8k32 fp8 fragment has the same bytes as an m16n8k16 bf16 one, so the copies
-// and ldmatrix are gemm_tc's. there are no transposed layouts: mx scales run along
-// k, so every operand gets quantized k-major anyway.
+// and ldmatrix work the way gemm_tc's do. there are no transposed layouts: mx scales
+// run along k, so every operand gets quantized k-major anyway.
+// a tile goes twice as fast as gemm_tc's, so it takes three stages of copies to
+// hide the latency. to fit two blocks an SM that way the rows aren't padded:
+// 16-byte chunk c of row r sits at chunk c ^ ((r>>1)&3), and the 8 rows one
+// ldmatrix reads still land in 8 different bank groups. 16 KB a stage, 48 KB a block.
 // the scales come straight from global, three u16 loads a thread a k tile. the mma
 // takes row r of an A tile from lane 4r (r+8 from 4r+1, thread-id 1 adds 2) and
 // column j of a B tile from lane 4j + thread-id (see mx_probe), so lane 4g+t holds
@@ -490,8 +494,8 @@ done:
     .param .u64 pr,
     .param .u32 pf)
 {
-    .shared .align 16 .b8 sm[40960];
-    .reg .pred  %p, %pbf, %pr;
+    .shared .align 128 .b8 sm[49152];
+    .reg .pred  %p, %p2, %pbf, %pr;
     .reg .b32   %r<80>;
     .reg .b64   %rd<40>;
     .reg .f32   %f<64>;                         // accumulator (mi, ni, j) is f[16mi + 4ni + j]
@@ -542,12 +546,16 @@ done:
     add.u64         %rd4, %rd4, %rd10;
     add.u64         %rd8, %rd2, %rd4;
     add.u64         %rd9, %rd8, %rd6;
-    mul.lo.u32      %r14, %r10, 80;
-    add.u32         %r14, %r14, %r11;
+    shr.u32         %r15, %r10, 1;              // the swizzle: chunk ^ (r>>1)&3
+    and.b32         %r15, %r15, 3;
+    shl.b32         %r15, %r15, 4;
+    xor.b32         %r15, %r15, %r11;
+    shl.b32         %r14, %r10, 6;
+    add.u32         %r14, %r14, %r15;
     add.u32         %r16, %r9, %r14;
-    add.u32         %r17, %r16, 5120;
-    add.u32         %r18, %r16, 10240;
-    add.u32         %r19, %r18, 5120;
+    add.u32         %r17, %r16, 4096;
+    add.u32         %r18, %r16, 8192;
+    add.u32         %r19, %r16, 12288;
 
     // this block's share of the k tiles, and its own partial C when split
     shr.u32         %r20, %r3, 6;               // k tiles
@@ -601,7 +609,7 @@ done:
     add.u64         %rd28, %rd28, %rd27;
     add.u64         %rd28, %rd28, %rd26;
 
-    // tile 0 into stage 0, then point at tile 1
+    // tiles 0 and 1 into stages 0 and 1, a group each (tile 1's empty if there's none)
     cp.async.cg.shared.global [%r16], [%rd5], 16;
     cp.async.cg.shared.global [%r17], [%rd7], 16;
     cp.async.cg.shared.global [%r18], [%rd8], 16;
@@ -611,9 +619,25 @@ done:
     add.u64         %rd7, %rd7, 64;
     add.u64         %rd8, %rd8, 64;
     add.u64         %rd9, %rd9, 64;
+    setp.gt.u32     %p, %r20, 1;
+    add.u32         %r35, %r16, 16384;
+    @%p cp.async.cg.shared.global [%r35], [%rd5], 16;
+    add.u32         %r35, %r17, 16384;
+    @%p cp.async.cg.shared.global [%r35], [%rd7], 16;
+    add.u32         %r35, %r18, 16384;
+    @%p cp.async.cg.shared.global [%r35], [%rd8], 16;
+    add.u32         %r35, %r19, 16384;
+    @%p cp.async.cg.shared.global [%r35], [%rd9], 16;
+    cp.async.commit_group;
+    @%p add.u64     %rd5, %rd5, 64;
+    @%p add.u64     %rd7, %rd7, 64;
+    @%p add.u64     %rd8, %rd8, 64;
+    @%p add.u64     %rd9, %rd9, 64;
 
-    // ldmatrix addresses in stage 0: A (r27) row wm*64 + lane%16, k byte (lane/16)*16,
-    // B (r30) n row wn*32 + lane%8 + (lane/16)*8, k byte ((lane/8)%2)*16
+    // ldmatrix addresses in stage 0, swizzled: A (r27) row wm*64 + lane%16, chunk
+    // lane/16, B (r30) n row wn*32 + lane%8 + (lane/16)*8, chunk (lane/8)%2. the
+    // next m tile or n pair is 16 rows on (1024 bytes, same swizzle), and k 32..63
+    // is chunk+2, which is the address xor 32
     and.b32         %r40, %r6, 7;
     shr.u32         %r41, %r6, 3;
     and.b32         %r41, %r41, 1;
@@ -621,18 +645,24 @@ done:
     and.b32         %r24, %r6, 15;
     shl.b32         %r25, %r22, 6;
     add.u32         %r24, %r24, %r25;
-    mul.lo.u32      %r24, %r24, 80;
-    shl.b32         %r26, %r42, 4;
+    shr.u32         %r26, %r24, 1;
+    and.b32         %r26, %r26, 3;
+    xor.b32         %r26, %r26, %r42;
+    shl.b32         %r26, %r26, 4;
+    shl.b32         %r24, %r24, 6;
     add.u32         %r24, %r24, %r26;
     add.u32         %r27, %r9, %r24;
     shl.b32         %r28, %r42, 3;
     add.u32         %r28, %r28, %r40;
     shl.b32         %r29, %r23, 5;
     add.u32         %r28, %r28, %r29;
-    mul.lo.u32      %r28, %r28, 80;
-    shl.b32         %r29, %r41, 4;
+    shr.u32         %r29, %r28, 1;
+    and.b32         %r29, %r29, 3;
+    xor.b32         %r29, %r29, %r41;
+    shl.b32         %r29, %r29, 4;
+    shl.b32         %r28, %r28, 6;
     add.u32         %r28, %r28, %r29;
-    add.u32         %r28, %r28, 10240;
+    add.u32         %r28, %r28, 8192;
     add.u32         %r30, %r9, %r28;
 
     // where this thread's part of C is: rows bm + wm*64 + 16mi + g (and +8),
@@ -711,7 +741,8 @@ initr:
     ld.global.v2.f32 {%f62, %f63}, [%rd17+96];
 
 kstart:
-    mov.u32         %r21, 0;                    // this one
+    mov.u32         %r21, 0;                    // this tile
+    mov.u32         %r31, 0;                    // its stage
 kloop:
     // this tile's scales, they land while we wait for its data
     ld.global.nc.u16 %r71, [%rd24];
@@ -720,41 +751,35 @@ kloop:
     add.u64         %rd24, %rd24, 2;
     add.u64         %rd25, %rd25, 2;
     add.u64         %rd28, %rd28, 2;
-    // start the next tile into the other stage, if there is one
-    add.u32         %r32, %r21, 1;
-    setp.ge.u32     %p, %r32, %r20;
-    @%p bra         last;
-    and.b32         %r33, %r32, 1;
-    mul.lo.u32      %r33, %r33, 20480;
-    add.u32         %r34, %r16, %r33;
-    cp.async.cg.shared.global [%r34], [%rd5], 16;
-    add.u32         %r34, %r17, %r33;
-    cp.async.cg.shared.global [%r34], [%rd7], 16;
-    add.u32         %r34, %r18, %r33;
-    cp.async.cg.shared.global [%r34], [%rd8], 16;
-    add.u32         %r34, %r19, %r33;
-    cp.async.cg.shared.global [%r34], [%rd9], 16;
-    cp.async.commit_group;
-    add.u64         %rd5, %rd5, 64;
-    add.u64         %rd7, %rd7, 64;
-    add.u64         %rd8, %rd8, 64;
-    add.u64         %rd9, %rd9, 64;
     cp.async.wait_group 1;                      // all but the newest group: this tile is in
-    bra             ready;
-last:
-    cp.async.wait_group 0;
-ready:
     bar.sync        0;
+    // and everyone's done with the last tile, so tile+2 can go into its stage
+    add.u32         %r33, %r21, 2;
+    setp.lt.u32     %p, %r33, %r20;
+    add.u32         %r34, %r31, 32768;
+    setp.ge.u32     %p2, %r34, 49152;
+    @%p2 sub.u32    %r34, %r34, 49152;
+    add.u32         %r35, %r16, %r34;
+    @%p cp.async.cg.shared.global [%r35], [%rd5], 16;
+    add.u32         %r35, %r17, %r34;
+    @%p cp.async.cg.shared.global [%r35], [%rd7], 16;
+    add.u32         %r35, %r18, %r34;
+    @%p cp.async.cg.shared.global [%r35], [%rd8], 16;
+    add.u32         %r35, %r19, %r34;
+    @%p cp.async.cg.shared.global [%r35], [%rd9], 16;
+    cp.async.commit_group;
+    @%p add.u64     %rd5, %rd5, 64;
+    @%p add.u64     %rd7, %rd7, 64;
+    @%p add.u64     %rd8, %rd8, 64;
+    @%p add.u64     %rd9, %rd9, 64;
     shl.b32         %r72, %r72, 16;
     or.b32          %r74, %r71, %r72;           // A's 4 scale bytes
-    and.b32         %r35, %r21, 1;
-    mul.lo.u32      %r35, %r35, 20480;
-    add.u32         %r36, %r27, %r35;           // A, mi 0
-    add.u32         %r54, %r36, 1280;           // mi 1
-    add.u32         %r55, %r54, 1280;           // mi 2
-    add.u32         %r56, %r55, 1280;           // mi 3
-    add.u32         %r37, %r30, %r35;           // B, n tiles 0-1
-    add.u32         %r57, %r37, 1280;           // n tiles 2-3
+    add.u32         %r36, %r27, %r31;           // A, mi 0
+    add.u32         %r54, %r36, 1024;           // mi 1
+    add.u32         %r55, %r54, 1024;           // mi 2
+    add.u32         %r56, %r55, 1024;           // mi 3
+    add.u32         %r37, %r30, %r31;           // B, n tiles 0-1
+    add.u32         %r57, %r37, 1024;           // n tiles 2-3
 
     // k 0..31 of the tile
     ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
@@ -781,12 +806,12 @@ ready:
     mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f60, %f61, %f62, %f63}, {%ra12, %ra13, %ra14, %ra15}, {%rb6, %rb7}, {%f60, %f61, %f62, %f63}, {%r74}, {%i2, %i1}, {%r73}, {%i0, %i3};
 
     // k 32..63
-    add.u32         %r36, %r36, 32;
-    add.u32         %r54, %r54, 32;
-    add.u32         %r55, %r55, 32;
-    add.u32         %r56, %r56, 32;
-    add.u32         %r37, %r37, 32;
-    add.u32         %r57, %r57, 32;
+    xor.b32         %r36, %r36, 32;
+    xor.b32         %r54, %r54, 32;
+    xor.b32         %r55, %r55, 32;
+    xor.b32         %r56, %r56, 32;
+    xor.b32         %r37, %r37, 32;
+    xor.b32         %r57, %r57, 32;
     ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra0, %ra1, %ra2, %ra3}, [%r36];
     ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra4, %ra5, %ra6, %ra7}, [%r54];
     ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%ra8, %ra9, %ra10, %ra11}, [%r55];
@@ -810,8 +835,10 @@ ready:
     mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f56, %f57, %f58, %f59}, {%ra12, %ra13, %ra14, %ra15}, {%rb4, %rb5}, {%f56, %f57, %f58, %f59}, {%r74}, {%i3, %i1}, {%r73}, {%i1, %i2};
     mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 {%f60, %f61, %f62, %f63}, {%ra12, %ra13, %ra14, %ra15}, {%rb6, %rb7}, {%f60, %f61, %f62, %f63}, {%r74}, {%i3, %i1}, {%r73}, {%i1, %i3};
 
-    bar.sync        0;                          // everyone's done reading before this stage refills
     add.u32         %r21, %r21, 1;
+    add.u32         %r31, %r31, 16384;
+    setp.eq.u32     %p2, %r31, 49152;
+    @%p2 mov.u32    %r31, 0;
     setp.lt.u32     %p, %r21, %r20;
     @%p bra         kloop;
 
