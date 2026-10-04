@@ -20,6 +20,7 @@ for %%t in (gpuinfo gpubench) do (
 call .\build.bat train\train >nul || (echo build failed: train& set BAD=1)
 call .\build.bat train\chatpack >nul || (echo build failed: chatpack& set BAD=1)
 call .\build.bat train\profile >nul || (echo build failed: profile& set BAD=1)
+call .\build.bat asmdata\asmset >nul || (echo build failed: asmset& set BAD=1)
 call .\build.bat test\resume >nul || (echo build failed: resume& set BAD=1)
 for %%t in (quantize chat gguf) do (
     call .\build.bat chat\%%t >nul || (echo build failed: %%t& set BAD=1)
