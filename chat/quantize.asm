@@ -1,7 +1,8 @@
-; quantize checkpoint.ckpt out.mnm [q8|q4|f32] [rope_base=10000] [tok=datasets\tokenizer.bin] [fit=1]
+; quantize checkpoint.ckpt out.mnm [q8|q4|f32] [rope_base=10000] [tok=datasets\tokenizer.bin] [fit=0]
 ; a training checkpoint -> a model file for the cpu (chat/model.inc): the f32
 ; weights, int8 with a scale per row, or int4 with a scale per group of 32.
-; the norm weights stay f32. fit=1 searches each int4 group's scale (q4_row_fit)
+; the norm weights stay f32. int4 scales are searched for (q4_row_fit), fit=0 gives the
+; old max/7 ones (q4_row)
 ; uses: chat\quant tokenizer\tok tokenizer\pretok
 default rel
 bits 64
@@ -75,7 +76,7 @@ start:
 .typed:
     call cfg_args
     lea rcx, [k_fit]
-    xor edx, edx
+    mov edx, 1
     call cfg_int
     lea rdx, [q4_row]
     lea r8, [q4_row_fit]

@@ -1,4 +1,4 @@
-; gguf checkpoint.ckpt out.gguf [q8_0|q4_0|f16|f32] [tok=datasets\tokenizer.bin] [rope_base=10000] [name=Mnemonic]
+; gguf checkpoint.ckpt out.gguf [q8_0|q4_0|f16|f32] [tok=datasets\tokenizer.bin] [rope_base=10000] [name=Mnemonic] [fit=0]
 ; a training checkpoint -> a gguf file, for llama.cpp and ollama. mnemonic is already laid
 ; out like llama (rope on (2i, 2i+1) pairs, kv head = q head / group size, gate first in
 ; w13), so it goes in as arch "llama" with qkv and w13 cut into their parts. there's no
@@ -45,6 +45,7 @@ section .rdata
 k_tok    db "tok", 0
 k_rope   db "rope_base", 0
 k_name   db "name", 0
+k_fit    db "fit", 0
 d_tok    db "datasets\tokenizer.bin", 0
 d_name   db "Mnemonic", 0
 e_usage  db "usage: gguf checkpoint.ckpt out.gguf [q8_0|q4_0|f16|f32]", 0
@@ -133,6 +134,7 @@ ntens    resq 1
 dbuf     resq 1                 ; one converted tensor
 tq       resq 1                 ; qx_vec's output
 tsc      resq 1
+gfit     resq 1                 ; q4_0 scales searched for (q4_row_fit), or llama.cpp's
 written  resq 1
 L        resq 1
 D        resq 1
@@ -226,6 +228,10 @@ start:
     lea rcx, [e_cols]
     call fatal
 .cols:
+    lea rcx, [k_fit]
+    mov edx, 1
+    call cfg_int
+    mov [gfit], rax
     lea rcx, [k_rope]
     movsd xmm1, [c_rope]
     call cfg_float
@@ -1074,6 +1080,44 @@ conv:
     jmp .q8
 
 .q4:
+    cmp qword [gfit], 0
+    je .q4old
+    ; q4_row_fit picks each block's scale (see chat\quant.asm), this regroups it into
+    ; 18 byte blocks: the scale as f16, then the same 16 bytes of nibbles
+    test r12, r12
+    jz .done
+    mov r13, r12
+    cmp r13, CHUNK
+    jbe .fc
+    mov r13d, CHUNK
+.fc:
+    vzeroupper
+    mov rcx, rsi
+    mov rdx, r13
+    mov r8, [tq]
+    mov r9, [tsc]
+    call q4_row_fit
+    mov rcx, r13
+    shr rcx, 5
+    mov r8, [tq]
+    mov r9, [tsc]
+.fb:
+    vmovss xmm0, [r9]
+    vcvtps2ph xmm0, xmm0, 0
+    vmovd eax, xmm0
+    mov [rdi], ax
+    vmovdqu xmm0, [r8]
+    vmovdqu [rdi+2], xmm0
+    add r8, 16
+    add r9, 4
+    add rdi, 18
+    dec rcx
+    jnz .fb
+    lea rsi, [rsi+r13*4]
+    sub r12, r13
+    jmp .q4
+
+.q4old:
     ; llama.cpp's q4_0: d = (the value with the biggest magnitude) / -8, so it uses
     ; all 16 levels. nibble j of a block is x_j (low) and x_{j+16} (high), stored + 8
     test r12, r12
@@ -1127,7 +1171,7 @@ conv:
     add rsi, 128
     add rdi, 18
     sub r12, 32
-    jmp .q4
+    jmp .q4old
 
 .done:
     vzeroupper
