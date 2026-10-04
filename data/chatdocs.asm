@@ -2,7 +2,8 @@
 ; (file.docs next to it unless told otherwise), for tokenize.
 ; conversations are separated by blank lines. "user:", "assistant:" or "system:"
 ; at the start of a line begins a message, any other line continues the last
-; one (joined with a newline). lines starting with # are comments
+; one (joined with a newline). lines starting with # are comments, a line of just
+; "." is an empty line in a message
 default rel
 bits 64
 %include "lib.inc"
@@ -106,6 +107,14 @@ parse:
 .content:
     cmp byte [rsi], '#'
     je .next
+    lea rax, [rsi+1]
+    cmp rax, rbx
+    jne .role
+    cmp byte [rsi], '.'
+    jne .role
+    mov rsi, rbx
+    jmp .carry
+.role:
     ; a new message?
     mov r8d, ROLE_USER
     lea rcx, [k_user]
@@ -123,6 +132,7 @@ parse:
     call prefix
     jz .msg
     ; carries on the last message
+.carry:
     cmp dword [open], 0
     jne .cont
     lea rcx, [e_line]
