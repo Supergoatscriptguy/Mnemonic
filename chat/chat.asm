@@ -1,7 +1,7 @@
 ; chat: talk to the model, on the cpu.
-;   bin\chat                         models\mnemonic-q8.mnm
-;   bin\chat model=models\mnemonic-q4.mnm temp=0.8 top_p=0.9
-;   bin\chat eval=datasets\chat\val.tok rows=8     loss and speed on a .tok file
+;   bin\chat                         models\mnemonic-300m-q8.mnm
+;   bin\chat model=models\mnemonic-q8.mnm temp=0.8 top_p=0.9     (the 126M)
+;   bin\chat eval=datasets\chat\val2048.tok rows=4     loss and speed on a .tok file
 ; the conversation lives in the kv cache, so a turn only runs its new tokens.
 ; /reset starts over, /quit (or ctrl+z) leaves, ctrl+c stops a reply
 ; uses: chat\quant chat\kernels chat\engine tokenizer\tok tokenizer\pretok
@@ -25,7 +25,7 @@ k_thr    db "threads", 0
 k_seed   db "seed", 0
 k_eval   db "eval", 0
 k_rows   db "rows", 0
-d_model  db "models\mnemonic-q8.mnm", 0
+d_model  db "models\mnemonic-300m-q8.mnm", 0
 d_tok    db "datasets\tokenizer.bin", 0
 s_qt     db "f32", 0, 0, 0, 0, 0, "int8", 0, 0, 0, 0, "int4", 0
 e_tok    db "can't load the tokenizer", 0
