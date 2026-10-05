@@ -543,14 +543,7 @@ resume:
     mov rcx, rax
     lea rdx, [hdr]
     call ck_load
-    mov rcx, [d_adm]
-    xor edx, edx
-    mov r8, [mdl+MD_NP]
-    CU cuMemsetD32
-    mov rcx, [d_adv]
-    xor edx, edx
-    mov r8, [mdl+MD_NP]
-    CU cuMemsetD32
+    call model_adam0
     say "  starting from the weights in "
     mov rcx, [rsp+32]
     call print_z

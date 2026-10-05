@@ -41,6 +41,8 @@ u       resq 1                  ; direction
 loss0   resq 1
 eps     resq 1
 tname   resb 64
+; t_adam16's f32 constants: b1 b2 1-b1 1-b2 -lr eps -lr*wd, then bc1 bc2 for steps 1, 2
+ac      resd 12
 
 section .text
 
@@ -237,6 +239,7 @@ start:
     call fdcheck
     call t_adam
     call t_overfit
+    call t_adam16
     jmp t_done
 
 section .rdata
@@ -584,6 +587,189 @@ t_overfit:
     pop rbx
     ret
 
+; adamw16 (adam16=1): two steps from w0 with g0, against the cpu doing the same f32
+; ops, with m and v rounded to bf16 in between. bit for bit. the moments get the
+; adam16 layout (v right after m) inside the f32 m buffer, which is big enough
+t_adam16:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 48
+    mov rbx, [mdl+MD_NP]
+    mov rcx, [d_params]
+    mov rdx, [w0]
+    lea r8, [rbx*4]
+    call gpu_up
+    mov rcx, [d_grad]
+    mov rdx, [g0]
+    lea r8, [rbx*4]
+    call gpu_up
+    mov rax, [d_adv]
+    mov [rsp+32], rax           ; the f32 v, back at the end
+    mov rax, [d_adm]
+    lea rax, [rax+rbx*2]
+    mov [d_adv], rax
+    mov dword [mdl_adam16], 1
+    call model_adam0
+    lea rcx, [opt16]
+    mov edx, 1
+    call model_step
+    lea rcx, [opt16]
+    mov edx, 2
+    call model_step
+    mov rcx, [u]
+    mov rdx, [d_params]
+    lea r8, [rbx*4]
+    call gpu_down
+    lea rcx, [rbx*4]
+    call mem_alloc
+    mov r15, rax                ; m then v, bf16
+    mov rcx, r15
+    mov rdx, [d_adm]
+    lea r8, [rbx*4]
+    call gpu_down
+    mov dword [mdl_adam16], 0
+    mov rax, [rsp+32]
+    mov [d_adv], rax
+
+    ; the f32 constants, made the way model_step and the kernel make them
+    lea rsi, [ac]
+    cvtsd2ss xmm0, [opt16+OP_B1]
+    movss [rsi], xmm0
+    cvtsd2ss xmm0, [opt16+OP_B2]
+    movss [rsi+4], xmm0
+    mov eax, __?float32?__(1.0)
+    movd xmm0, eax
+    subss xmm0, [rsi]
+    movss [rsi+8], xmm0
+    movd xmm0, eax
+    subss xmm0, [rsi+4]
+    movss [rsi+12], xmm0
+    cvtsd2ss xmm0, [opt16+OP_LR]
+    movss [rsi+16], xmm0
+    cvtsd2ss xmm0, [opt16+OP_EPS]
+    movss [rsi+20], xmm0
+    cvtsd2ss xmm1, [opt16+OP_WD]
+    mulss xmm1, [rsi+16]
+    movss [rsi+24], xmm1
+    xor dword [rsi+16], 0x80000000  ; -lr and -lr*wd, for the fmas
+    xor dword [rsi+24], 0x80000000
+    mov r12d, 1
+.bc:
+    movsd xmm0, [opt16+OP_B1]
+    call math_log
+    cvtsi2sd xmm1, r12
+    mulsd xmm0, xmm1
+    call math_exp
+    movsd xmm1, [c_one]
+    subsd xmm1, xmm0
+    movsd xmm0, [c_one]
+    divsd xmm0, xmm1
+    cvtsd2ss xmm0, xmm0
+    lea rsi, [ac]
+    movss [rsi+r12*8+20], xmm0  ; bc1 at 28 + 8(t-1)
+    movsd xmm0, [opt16+OP_B2]
+    call math_log
+    cvtsi2sd xmm1, r12
+    mulsd xmm0, xmm1
+    call math_exp
+    movsd xmm1, [c_one]
+    subsd xmm1, xmm0
+    movsd xmm0, [c_one]
+    divsd xmm0, xmm1
+    cvtsd2ss xmm0, xmm0
+    lea rsi, [ac]
+    movss [rsi+r12*8+24], xmm0  ; bc2
+    inc r12d
+    cmp r12d, 2
+    jbe .bc
+
+    mov rsi, [w0]
+    mov rdi, [g0]
+    mov r13, [mdl+MD_NDEC]
+    xor r14d, r14d              ; mismatches
+    xor r12d, r12d
+.e:
+    cmp r12, rbx
+    jae .ed
+    vmovss xmm0, [rdi+r12*4]    ; g
+    vmovss xmm4, [rsi+r12*4]    ; p
+    vxorps xmm1, xmm1, xmm1     ; m
+    vxorps xmm2, xmm2, xmm2     ; v
+    lea r8, [ac+28]             ; this step's bc1, bc2
+    mov r9d, 2
+.t:
+    lea rcx, [ac]
+    vmulss xmm1, xmm1, [rcx]
+    vfmadd231ss xmm1, xmm0, [rcx+8]
+    vmulss xmm3, xmm0, xmm0
+    vmulss xmm2, xmm2, [rcx+4]
+    vfmadd231ss xmm2, xmm3, [rcx+12]
+    vmulss xmm3, xmm2, [r8+4]
+    vsqrtss xmm3, xmm3, xmm3
+    vaddss xmm3, xmm3, [rcx+20]
+    vmulss xmm5, xmm1, [r8]
+    vdivss xmm5, xmm5, xmm3
+    cmp r12, r13
+    jae .nod
+    vfmadd231ss xmm4, xmm4, [rcx+24]    ; p - lr*wd*p
+.nod:
+    vfmadd231ss xmm4, xmm5, [rcx+16]    ; p - lr*u
+    ; m and v go to bf16 and come back that way next step
+    vmovd eax, xmm1
+    mov edx, eax
+    shr edx, 16
+    and edx, 1
+    lea eax, [rax+rdx+0x7fff]
+    shr eax, 16
+    mov r10d, eax
+    shl eax, 16
+    vmovd xmm1, eax
+    vmovd eax, xmm2
+    mov edx, eax
+    shr edx, 16
+    and edx, 1
+    lea eax, [rax+rdx+0x7fff]
+    shr eax, 16
+    mov r11d, eax
+    shl eax, 16
+    vmovd xmm2, eax
+    add r8, 8
+    dec r9d
+    jnz .t
+    vmovd eax, xmm4
+    mov rdx, [u]
+    cmp eax, [rdx+r12*4]
+    jne .bad
+    cmp r10w, [r15+r12*2]
+    jne .bad
+    lea rdx, [r15+rbx*2]
+    cmp r11w, [rdx+r12*2]
+    je .ok
+.bad:
+    inc r14d
+.ok:
+    inc r12
+    jmp .e
+.ed:
+    mov rcx, r15
+    call mem_free
+    test r14d, r14d
+    check z, "adamw16, two steps: weights, m and v the same bits as the cpu"
+    add rsp, 48
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
 ; xmm0 = mean loss of a forward pass over the batch
 loss:
     sub rsp, 40
@@ -599,5 +785,6 @@ loss:
 section .rdata
 align 8
 opt     dq 1e-2, 0.9, 0.95, 1e-8, 0.1, 1.0     ; lr b1 b2 eps wd clip
+opt16   dq 1e-2, 0.9, 0.95, 1e-8, 0.1, 0.0     ; no clipping, so g goes in as it is
 c_1em6  dq 1e-6
 c_one   dq 1.0

@@ -1,7 +1,8 @@
 ; checkpoints: a header (train/train.inc), then the f32 weights, adam's m and v.
 ; written to a temp file, flushed, then renamed over the real name, so a crash
 ; mid-save leaves the previous checkpoint alone. the bf16 copy isn't saved, it
-; gets rebuilt from the weights on load
+; gets rebuilt from the weights on load. m and v are f32 in the file even when
+; adam16 keeps them in bf16, so a run can switch either way
 default rel
 bits 64
 %include "lib.inc"
@@ -64,9 +65,9 @@ ck_save:
     lea rsi, [d_params]
     call .arr
     lea rsi, [d_adm]
-    call .arr
+    call .mom
     lea rsi, [d_adv]
-    call .arr
+    call .mom
     mov rcx, rbx
     call file_flush
     mov rcx, rbx
@@ -90,6 +91,33 @@ ck_save:
     mov r8, [mdl+MD_NP]
     shl r8, 2
     call gpu_down
+    mov rcx, rbx
+    mov rdx, rdi
+    mov r8, [mdl+MD_NP]
+    shl r8, 2
+    call file_write
+    add rsp, 40
+    test eax, eax
+    jz .bad
+    ret
+.mom:                           ; a moment: bf16 ones get widened, back to front
+    cmp dword [mdl_adam16], 0
+    je .arr
+    sub rsp, 40
+    mov rcx, rdi
+    mov rdx, [rsi]
+    mov r8, [mdl+MD_NP]
+    add r8, r8
+    call gpu_down
+    mov rcx, [mdl+MD_NP]
+.w:
+    dec rcx
+    js .wd
+    movzx eax, word [rdi+rcx*2]
+    shl eax, 16
+    mov [rdi+rcx*4], eax
+    jmp .w
+.wd:
     mov rcx, rbx
     mov rdx, rdi
     mov r8, [mdl+MD_NP]
@@ -144,9 +172,9 @@ ck_load:
     lea rsi, [d_params]
     call .arr
     lea rsi, [d_adm]
-    call .arr
+    call .mom
     lea rsi, [d_adv]
-    call .arr
+    call .mom
     mov rcx, rbx
     call file_close
     call model_cast
@@ -171,6 +199,40 @@ ck_load:
     mov rdx, rdi
     mov r8, [mdl+MD_NP]
     shl r8, 2
+    call gpu_up
+    add rsp, 40
+    ret
+.mom:                           ; a moment: rounded to bf16 for adam16, front to back
+    cmp dword [mdl_adam16], 0
+    je .arr
+    sub rsp, 40
+    mov rcx, rbx
+    mov rdx, rdi
+    mov r8, [mdl+MD_NP]
+    shl r8, 2
+    call file_read
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    cmp rax, rcx
+    jne .bad
+    xor ecx, ecx
+.n:
+    cmp rcx, [mdl+MD_NP]
+    jae .nd
+    mov eax, [rdi+rcx*4]
+    mov edx, eax
+    shr edx, 16
+    and edx, 1
+    lea eax, [rax+rdx+0x7fff]
+    shr eax, 16
+    mov [rdi+rcx*2], ax
+    inc rcx
+    jmp .n
+.nd:
+    mov rcx, [rsi]
+    mov rdx, rdi
+    mov r8, [mdl+MD_NP]
+    add r8, r8
     call gpu_up
     add rsp, 40
     ret

@@ -940,7 +940,8 @@ done:
 
 // adamw over every parameter, with gradient clipping by the global norm (sqrt of
 // *pgn, from sumsq). params [0, nd) are matrices and get weight decay.
-// also refreshes the bf16 copy the matmuls read
+// also refreshes the bf16 copy the matmuls read, unless pb is 0 (fp8 layers have
+// their own copies)
 .visible .entry adamw(
     .param .u64 pp,
     .param .u64 pg,
@@ -1031,10 +1032,126 @@ loop:
     mul.f32         %f22, %f19, %f1;
     sub.f32         %f20, %f20, %f22;
     st.global.f32   [%rd11], %f20;
+    setp.eq.u64     %p, %rd6, 0;
+    @%p bra         next;
     mul.wide.u32    %rd12, %r6, 2;
     add.u64         %rd12, %rd6, %rd12;
     cvt.rn.bf16.f32 %h, %f20;
     st.global.b16   [%rd12], %h;
+next:
+    add.u32         %r6, %r6, %r7;
+    bra             loop;
+done:
+    ret;
+}
+
+// adamw with m and v kept in bf16 (adam16=1), half their memory. they're updated
+// in f32 and rounded on the way out; with b2 = 0.95 v moves 5% a step, well above
+// bf16's 0.4% resolution. same args as adamw. the decay and the update are explicit
+// fmas: a plain mul then sub can get fused or not at the jit's whim, and test\grad
+// checks this one bit for bit
+.visible .entry adamw16(
+    .param .u64 pp,
+    .param .u64 pg,
+    .param .u64 pm,
+    .param .u64 pv,
+    .param .u64 pb,
+    .param .u64 pgn,
+    .param .u32 pn,
+    .param .u32 pnd,
+    .param .f32 plr,
+    .param .f32 pb1,
+    .param .f32 pb2,
+    .param .f32 peps,
+    .param .f32 pwd,
+    .param .f32 pbc1,
+    .param .f32 pbc2,
+    .param .f32 pclip)
+{
+    .reg .pred  %p;
+    .reg .b32   %r<16>;
+    .reg .b64   %rd<16>;
+    .reg .f32   %f<32>;
+    .reg .b16   %h;
+
+    ld.param.u32    %r1, [pn];
+    ld.param.u32    %r2, [pnd];
+    ld.param.f32    %f1, [plr];
+    ld.param.f32    %f2, [pb1];
+    ld.param.f32    %f3, [pb2];
+    ld.param.f32    %f4, [peps];
+    ld.param.f32    %f5, [pwd];
+    ld.param.f32    %f6, [pbc1];
+    ld.param.f32    %f7, [pbc2];
+    ld.param.f32    %f8, [pclip];
+    sub.f32         %f9, 0f3F800000, %f2;       // 1 - b1
+    sub.f32         %f10, 0f3F800000, %f3;      // 1 - b2
+    mul.f32         %f11, %f1, %f5;             // lr * wd
+    neg.f32         %f23, %f11;
+    neg.f32         %f24, %f1;
+    mov.f32         %f12, 0f3F800000;
+    setp.le.f32     %p, %f8, 0f00000000;
+    @%p bra         noclip;
+    ld.param.u64    %rd1, [pgn];
+    ld.global.f32   %f13, [%rd1];
+    sqrt.rn.f32     %f13, %f13;
+    add.f32         %f13, %f13, 0f358637BD;     // 1e-6
+    div.rn.f32      %f13, %f8, %f13;
+    min.f32         %f12, %f12, %f13;
+noclip:
+    ld.param.u64    %rd2, [pp];
+    ld.param.u64    %rd3, [pg];
+    ld.param.u64    %rd4, [pm];
+    ld.param.u64    %rd5, [pv];
+    ld.param.u64    %rd6, [pb];
+    mov.u32         %r3, %ctaid.x;
+    mov.u32         %r4, %ntid.x;
+    mov.u32         %r5, %tid.x;
+    mad.lo.u32      %r6, %r3, %r4, %r5;
+    mov.u32         %r7, %nctaid.x;
+    mul.lo.u32      %r7, %r7, %r4;
+loop:
+    setp.ge.u32     %p, %r6, %r1;
+    @%p bra         done;
+    mul.wide.u32    %rd7, %r6, 4;
+    mul.wide.u32    %rd13, %r6, 2;
+    add.u64         %rd8, %rd3, %rd7;
+    ld.global.f32   %f14, [%rd8];
+    mul.f32         %f14, %f14, %f12;           // g
+    add.u64         %rd9, %rd4, %rd13;
+    ld.global.u16   %r8, [%rd9];
+    shl.b32         %r8, %r8, 16;
+    mov.b32         %f15, %r8;
+    mul.f32         %f15, %f15, %f2;
+    fma.rn.f32      %f15, %f9, %f14, %f15;      // m
+    cvt.rn.bf16.f32 %h, %f15;
+    st.global.b16   [%rd9], %h;
+    add.u64         %rd10, %rd5, %rd13;
+    ld.global.u16   %r9, [%rd10];
+    shl.b32         %r9, %r9, 16;
+    mov.b32         %f16, %r9;
+    mul.f32         %f16, %f16, %f3;
+    mul.f32         %f17, %f14, %f14;
+    fma.rn.f32      %f16, %f10, %f17, %f16;     // v
+    cvt.rn.bf16.f32 %h, %f16;
+    st.global.b16   [%rd10], %h;
+    mul.f32         %f18, %f16, %f7;
+    sqrt.rn.f32     %f18, %f18;
+    add.f32         %f18, %f18, %f4;            // sqrt(vhat) + eps
+    mul.f32         %f19, %f15, %f6;            // mhat
+    div.rn.f32      %f19, %f19, %f18;
+    add.u64         %rd11, %rd2, %rd7;
+    ld.global.f32   %f20, [%rd11];
+    setp.lt.u32     %p, %r6, %r2;
+    @%p fma.rn.f32  %f20, %f23, %f20, %f20;     // decay
+    fma.rn.f32      %f20, %f24, %f19, %f20;
+    st.global.f32   [%rd11], %f20;
+    setp.eq.u64     %p, %rd6, 0;
+    @%p bra         next;
+    add.u64         %rd12, %rd6, %rd13;
+    cvt.rn.bf16.f32 %h, %f20;
+    st.global.b16   [%rd12], %h;
+next:
     add.u32         %r6, %r6, %r7;
     bra             loop;
 done:

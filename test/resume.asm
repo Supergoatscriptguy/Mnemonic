@@ -1,7 +1,9 @@
 ; stage 5 test: stop a training run half way, carry on from its checkpoint, and end
 ; up with exactly the same weights and adam state as a run that never stopped.
 ; runs bin\train.exe (the tiny preset) three times, on three little .tok files cut
-; from the real ones, so the runs cross files (and the stop lands in the second one)
+; from the real ones, so the runs cross files (and the stop lands in the second one).
+; then all of it again with fp8=1 adam16=1: the fp8 weight copies get rebuilt on
+; load, and the bf16 moments go through the f32 ones in the checkpoint
 default rel
 bits 64
 %include "lib.inc"
@@ -28,6 +30,21 @@ mid_b    db "checkpoints\restest_b\step_00000017.ckpt", 0
 end_a    db "checkpoints\restest_a\step_00000040.ckpt", 0
 end_b    db "checkpoints\restest_b\step_00000040.ckpt", 0
 e_spawn  db "CreateProcess failed", 0
+run_c    db "bin\train.exe tiny run=restest_c data=scratch\restest\*.tok fp8=1 adam16=1", 0
+run_d1   db "bin\train.exe tiny run=restest_d data=scratch\restest\*.tok stop_at=17 fp8=1 adam16=1", 0
+run_d2   db "bin\train.exe tiny run=restest_d data=scratch\restest\*.tok fp8=1 adam16=1", 0
+pat_c    db "checkpoints\restest_c\*.ckpt", 0
+pat_d    db "checkpoints\restest_d\*.ckpt", 0
+log_c    db "logs\restest_c.log", 0
+log_d    db "logs\restest_d.log", 0
+mid_d    db "checkpoints\restest_d\step_00000017.ckpt", 0
+end_c    db "checkpoints\restest_c\step_00000040.ckpt", 0
+end_d    db "checkpoints\restest_d\step_00000040.ckpt", 0
+align 8
+; a round: straight run, stopped run, resumed run, their checkpoint patterns and
+; logs, the stopped run's checkpoint, and the two final ones
+set_bf   dq run_a, run_b1, run_b2, pat_a, pat_b, log_a, log_b, mid_b, end_a, end_b
+set_fp8  dq run_c, run_d1, run_d2, pat_c, pat_d, log_c, log_d, mid_d, end_c, end_d
 
 section .bss
 alignb 8
@@ -47,40 +64,59 @@ global start
 start:
     sub rsp, 40
     call lib_init
-    ; start clean
-    lea rcx, [pat_a]
-    call wipe
-    lea rcx, [pat_b]
-    call wipe
-    lea rcx, [log_a]
-    call file_delete
-    lea rcx, [log_b]
-    call file_delete
     call parts
+    say "bf16", 13, 10
+    lea rcx, [set_bf]
+    call round
+    say "fp8=1 adam16=1", 13, 10
+    lea rcx, [set_fp8]
+    call round
+    jmp t_done
 
-    lea rcx, [run_a]
+section .rdata
+m_same db "both end on the same weights, adam state, step, data position and rng, bit for bit", 0
+section .text
+
+; rcx = a set (see set_bf)
+round:
+    push rbx
+    push rsi
+    push rdi
+    sub rsp, 32
+    mov rbx, rcx
+    ; start clean
+    mov rcx, [rbx+24]
+    call wipe
+    mov rcx, [rbx+32]
+    call wipe
+    mov rcx, [rbx+40]
+    call file_delete
+    mov rcx, [rbx+48]
+    call file_delete
+
+    mov rcx, [rbx]
     call run
     test eax, eax
     check z, "straight run, 40 steps"
-    lea rcx, [run_b1]
+    mov rcx, [rbx+8]
     call run
     cmp eax, 2
     check e, "stopped run, saves at step 17 and exits with 2"
-    lea rcx, [mid_b]
+    mov rcx, [rbx+56]
     call file_exists
     test eax, eax
     check nz, "its checkpoint is there"
-    lea rcx, [run_b2]
+    mov rcx, [rbx+16]
     call run
     test eax, eax
     check z, "resumed run, from 17 to 40"
 
     ; same bytes, apart from the wall clock time in the header
-    lea rcx, [end_a]
+    mov rcx, [rbx+64]
     call file_read_all
     mov [fa], rax
     mov [sza], rdx
-    lea rcx, [end_b]
+    mov rcx, [rbx+72]
     call file_read_all
     mov [fb], rax
     xor ecx, ecx
@@ -99,11 +135,11 @@ start:
     movzx ecx, cl
     lea rdx, [m_same]
     call t_ok
-    jmp t_done
-
-section .rdata
-m_same db "both end on the same weights, adam state, step, data position and rng, bit for bit", 0
-section .text
+    add rsp, 32
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
 
 ; scratch\restest\part_{0,1,2}.tok: the header and first PARTTOK tokens of
 ; shards 0, 1, 2, with the token count patched to match

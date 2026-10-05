@@ -1,8 +1,9 @@
 ; the transformer: config, sizes, buffers. include after lib.inc and gpu/cuda.inc
 
-extern model_config, model_setup, model_init, model_cast, model_fwd, model_bwd
+extern model_config, model_setup, model_init, model_cast, model_fwd, model_bwd, model_adam0
 extern model_zero, model_step, model_sort, model_loss, model_summary
-extern mdl, mdl_fast, mdl_streams, mdl_fp8, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
+extern mdl, mdl_fast, mdl_streams, mdl_fp8, mdl_adam16, mdl_bfall, lp, d_params, d_bf, d_grad
+extern d_adm, d_adv, d_logits, d_loss, d_gn
 extern k_f2bf, mm_ref_f, mm_tc_f
 
 ; mdl: the config plus everything derived from it. all u64

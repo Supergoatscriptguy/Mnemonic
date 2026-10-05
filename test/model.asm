@@ -1034,6 +1034,7 @@ t_whole:
     mov [mdl+MD_ROPE], rax
     mov dword [mdl_fast], 1         ; so setup checks the shapes
     mov dword [mdl_fp8], 1          ; loads and sets up the fp8 side too, used at the end
+    mov dword [mdl_bfall], 1        ; and keeps the bf16 copies the bf16 runs need
     mov ecx, 2
     call model_setup
     mov ecx, 11

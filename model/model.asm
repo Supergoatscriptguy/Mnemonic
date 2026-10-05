@@ -32,6 +32,7 @@ kn_swi     db "swiglu", 0
 kn_swib    db "swiglu_bwd", 0
 kn_xent    db "xent", 0
 kn_adamw   db "adamw", 0
+kn_adamw16 db "adamw16", 0
 kn_sumsq   db "sumsq", 0
 kn_split   db "splitsum", 0
 kn_attdot  db "att_dot", 0
@@ -61,6 +62,7 @@ ck_micro   db "micro", 0
 ck_rope    db "rope_base", 0
 ck_streams db "streams", 0
 ck_fp8     db "fp8", 0
+ck_adam16  db "adam16", 0
 e_heads    db "n_head has to be a multiple of n_kv_head, and d_model of n_head", 0
 e_fp8      db "fp8=1 needs the fast kernels", 0
 e_fast     db "the fast kernels need head dim 64, ctx a multiple of 64, and d_model, ffn, vocab, heads*64 and micro*ctx multiples of 128", 0
@@ -75,12 +77,16 @@ c_onef     dd 1.0
 
 section .bss
 alignb 8
-global mdl, mdl_fast, mdl_streams, mdl_fp8, lp, d_params, d_bf, d_grad, d_adm, d_adv, d_logits, d_loss, d_gn
-global k_f2bf, mm_ref_f, mm_tc_f
+global mdl, mdl_fast, mdl_streams, mdl_fp8, mdl_adam16, mdl_bfall, lp, d_params, d_bf, d_grad, d_adm, d_adv
+global d_logits, d_loss, d_gn, k_f2bf, mm_ref_f, mm_tc_f
 mdl        resb MD_SIZE
 mdl_fast   resd 1
 mdl_streams resd 1              ; 2 = weight gradients on a second stream in the backward
 mdl_fp8    resd 1               ; 1 = the layers' matmuls in mxfp8 (MM_X8 ones)
+mdl_adam16 resd 1               ; 1 = adam's m and v in bf16
+mdl_bfall  resd 1               ; 1 = a bf16 copy of every param even with fp8 (test\model
+                                ; runs both on one setup)
+d_bfn      resq 1               ; params with a bf16 copy: all, or just E under fp8
 mmbfx      resq 1               ; mmbf, mmbftb plus MM_X8
 mmbftbx    resq 1
 d_wq       resq 1               ; fp8 copies of the matrices, at their param offsets:
@@ -150,6 +156,7 @@ k_swi      resq 1
 k_swib     resq 1
 k_xent     resq 1
 k_adamw    resq 1
+k_adamw16  resq 1
 k_sumsq    resq 1
 k_splitsum resq 1
 k_attdot   resq 1
@@ -644,6 +651,10 @@ model_config:
     xor edx, edx
     call cfg_int
     mov [mdl_fp8], eax
+    lea rcx, [ck_adam16]
+    xor edx, edx
+    call cfg_int
+    mov [mdl_adam16], eax
     add rsp, 40
     ret
 
@@ -676,7 +687,8 @@ section .rdata
 align 8
 fl_ops  dq kn_embed, k_embed, kn_embedb, k_embedb, kn_rms, k_rms, kn_rmsb, k_rmsb
         dq kn_rmsdw, k_rmsdw, kn_colsum, k_colsum, kn_rope, k_rope, kn_swi, k_swi
-        dq kn_swib, k_swib, kn_xent, k_xent, kn_adamw, k_adamw, kn_sumsq, k_sumsq
+        dq kn_swib, k_swib, kn_xent, k_xent, kn_adamw, k_adamw, kn_adamw16, k_adamw16
+        dq kn_sumsq, k_sumsq
         dq kn_split, k_splitsum, 0
 fl_attn dq kn_attdot, k_attdot, kn_attsm, k_attsm, kn_attmix, k_attmix
         dq kn_attds, k_attds, kn_attdkv, k_attdkv
@@ -856,18 +868,38 @@ model_setup:
     lea rcx, [rbx*4]
     call dalloc
     mov [d_params], rax
-    lea rcx, [rbx*2]
+    ; the bf16 copy. under fp8 only E needs one (it's first), the layers have
+    ; their fp8 copies and the norms read the f32 masters
+    mov [d_bfn], rbx
+    cmp dword [mdl_fp8], 0
+    je .bf
+    cmp dword [mdl_bfall], 0
+    jne .bf
+    mov rax, [mdl+MD_V]
+    imul rax, [mdl+MD_D]
+    mov [d_bfn], rax
+.bf:
+    mov rcx, [d_bfn]
+    add rcx, rcx
     call dalloc
     mov [d_bf], rax
     lea rcx, [rbx*4]
     call dalloc
     mov [d_grad], rax
+    ; adam's moments: f32, or bf16 with v right after m
     lea rcx, [rbx*4]
     call dalloc
     mov [d_adm], rax
+    cmp dword [mdl_adam16], 0
+    je .m32
+    lea rax, [rax+rbx*2]
+    mov [d_adv], rax
+    jmp .moms
+.m32:
     lea rcx, [rbx*4]
     call dalloc
     mov [d_adv], rax
+.moms:
 
     ; activations per layer: offsets into a block, r12 = M, r13 = es
     mov r12, [mdl+MD_M]
@@ -1383,15 +1415,7 @@ model_init:
     call gpu_up
     mov rcx, rbx
     call mem_free
-    ; adam starts from zero
-    mov rcx, [d_adm]
-    xor edx, edx
-    mov r8, [mdl+MD_NP]
-    CU cuMemsetD32
-    mov rcx, [d_adv]
-    xor edx, edx
-    mov r8, [mdl+MD_NP]
-    CU cuMemsetD32
+    call model_adam0            ; adam starts from zero
     call model_cast
     add rsp, 48
     pop r13
@@ -1401,14 +1425,32 @@ model_init:
     pop rbx
     ret
 
-; bf16 copy of the master weights
+; adam's moments back to zero, whichever way they're stored
+global model_adam0
+model_adam0:
+    sub rsp, 40
+    mov rcx, [d_adm]
+    xor edx, edx
+    mov r8, [mdl+MD_NP]         ; all of m (f32), or m and v (bf16)
+    CU cuMemsetD32
+    cmp dword [mdl_adam16], 0
+    jne .done
+    mov rcx, [d_adv]
+    xor edx, edx
+    mov r8, [mdl+MD_NP]
+    CU cuMemsetD32
+.done:
+    add rsp, 40
+    ret
+
+; bf16 copy of the master weights (the ones that have one), and the fp8 ones
 global model_cast
 model_cast:
     sub rsp, 40
     KF k_f2bf
     karg 0, [d_bf]
     karg 1, [d_params]
-    karg 2, [mdl+MD_NP]
+    karg 2, [d_bfn]
     mov ecx, 4096               ; grid-stride
     shl ecx, 8
     call lin
@@ -2062,6 +2104,10 @@ model_step:
     call lin
 
     KF k_adamw
+    cmp dword [mdl_adam16], 0
+    je .k
+    KF k_adamw16
+.k:
     karg 0, [d_params]
     karg 1, [d_grad]
     karg 2, [d_adm]
@@ -2101,6 +2147,41 @@ model_step:
     movsd xmm0, [c_one]
     divsd xmm0, xmm1
     f32arg 14, xmm0
+    mov rax, [d_bfn]
+    cmp rax, [mdl+MD_NP]
+    jae .whole
+    ; only E has a bf16 copy: E first, then the rest with none
+    karg 6, [d_bfn]
+    karg 7, [d_bfn]
+    mov ecx, 4096
+    shl ecx, 8
+    call lin
+    mov rcx, [d_bfn]
+    mov rax, [d_params]
+    lea rax, [rax+rcx*4]
+    mov [kl+KL_ARGS], rax
+    mov rax, [d_grad]
+    lea rax, [rax+rcx*4]
+    mov [kl+KL_ARGS+8], rax
+    lea rdx, [rcx*4]
+    cmp dword [mdl_adam16], 0
+    je .m
+    lea rdx, [rcx*2]
+.m:
+    mov rax, [d_adm]
+    add rax, rdx
+    mov [kl+KL_ARGS+16], rax
+    mov rax, [d_adv]
+    add rax, rdx
+    mov [kl+KL_ARGS+24], rax
+    mov qword [kl+KL_ARGS+32], 0
+    mov rax, [mdl+MD_NP]
+    sub rax, rcx
+    mov [kl+KL_ARGS+48], rax
+    mov rax, [mdl+MD_NDEC]
+    sub rax, rcx
+    mov [kl+KL_ARGS+56], rax
+.whole:
     mov ecx, 4096
     shl ecx, 8
     call lin
