@@ -716,8 +716,8 @@ summary:
     ; by level
     mov r12d, 1
 .lv:
-    cmp r12, 3
-    jae .fails
+    cmp r12, 3                  ; levels 1 to 3
+    ja .fails
     xor esi, esi                ; tasks
     xor edi, edi                ; passed
     mov rbx, [tasks]
