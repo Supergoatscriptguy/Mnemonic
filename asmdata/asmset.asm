@@ -501,6 +501,8 @@ load_lesson:
     je .ret
     cmp qword [rbx+LS_TASK], 0
     je .ret
+    cmp qword [rbx+LS_TOPIC], 0     ; split goes by topic
+    je .ret
     inc qword [nls]
 .ret:
     add rsp, 40
