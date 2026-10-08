@@ -20,6 +20,7 @@ k_sys    db "system:"
 e_read   db "can't read the input", 0
 e_line   db "a line that continues a message, but there's no message yet", 0
 e_many   db "too many messages", 0
+e_write  db "can't write the output", 0
 
 section .bss
 alignb 8
@@ -272,37 +273,33 @@ write:
     mov [hdr+DH_TEXT], rax
     lea rcx, [outpath]
     call file_create
+    cmp rax, -1
+    je put.bad
     mov rbx, rax
-    mov rcx, rbx
     lea rdx, [hdr]
     mov r8d, DH_SIZE
-    call file_write
-    mov rcx, rbx
+    call put
     lea rdx, [offs]
     mov r8, [nmsg]
     lea r8, [r8*8+8]
-    call file_write
-    mov rcx, rbx
+    call put
     lea rdx, [roles]
     mov r8, [nmsg]
-    call file_write
+    call put
     ; pad the roles out to 8
     mov rax, [hdr+DH_CONVS]
     sub rax, [hdr+DH_ROLES]
     sub rax, [nmsg]
-    mov rcx, rbx
     lea rdx, [zeros]
     mov r8, rax
-    call file_write
-    mov rcx, rbx
+    call put
     lea rdx, [convs]
     mov r8, [nconv]
     lea r8, [r8*8+8]
-    call file_write
-    mov rcx, rbx
+    call put
     mov rdx, [text]
     mov r8, [tlen]
-    call file_write
+    call put
     mov rcx, rbx
     call file_close
     add rsp, 32
@@ -310,6 +307,19 @@ write:
     pop rsi
     pop rbx
     ret
+
+; write's file_write: rbx = file, rdx = buf, r8 = size. dies if it fails
+put:
+    sub rsp, 40
+    mov rcx, rbx
+    call file_write
+    test eax, eax
+    jz .bad
+    add rsp, 40
+    ret
+.bad:
+    lea rcx, [e_write]
+    call fatal
 
 section .rdata
 zeros dq 0
