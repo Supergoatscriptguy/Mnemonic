@@ -391,8 +391,6 @@ start:
     mov rcx, [secs+SEC_CODE]
     mov rdx, [secs+SEC_CODE+8]
     call code_of
-    mov [rsp+32], rax
-    mov [rsp+40], rdx       ; (shadow slots of ours, nothing's called in between)
     mov rcx, rax
     call code_check
     test rax, rax
