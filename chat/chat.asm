@@ -211,6 +211,8 @@ converse:
 .typed:
     test rbx, rbx
     jz .turn
+    cmp rbx, 4                  ; shorter, and the compares would see the last line's bytes
+    jb .say
     cmp dword [line], '/qui'
     je .done
     cmp dword [line], '/res'
