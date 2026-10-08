@@ -411,6 +411,10 @@ fetch:
     jne .fail                   ; connection dropped early
 .whole:
     mov rcx, r14
+    call file_flush             ; on the disk before the rename: a shard that exists never gets fetched again
+    test eax, eax
+    jz .fail
+    mov rcx, r14
     call file_close
     mov r14, -1
     lea rcx, [rbx+T_TMP]
