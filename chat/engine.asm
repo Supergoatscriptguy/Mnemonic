@@ -669,7 +669,7 @@ swiglu:
     ret
 
 ; ecx = token, edx = 1 to compute the logits. runs it through the model at the
-; next position and adds it to the kv cache
+; next position and adds it to the kv cache. trashes xmm6-15 (see mv_run)
 global eng_step
 eng_step:
     push rbx
@@ -785,7 +785,8 @@ eng_step:
     pop rbx
     ret
 
-; ecx = the token that came next. xmm0 = -log p(it) under the current logits (f64)
+; ecx = the token that came next. xmm0 = -log p(it) under the current logits (f64).
+; trashes xmm6-15
 global eng_nll
 eng_nll:
     push rbx
@@ -852,7 +853,7 @@ lmax:
 
 ; rcx = rng. eax = the next token from the logits: temperature samp_temp (0 = the
 ; most likely one), then top-p samp_topp among the 64 likeliest. the probabilities
-; come from the softmax over the whole vocab
+; come from the softmax over the whole vocab. trashes xmm6-15
 global samp_pick
 samp_pick:
     push rbx

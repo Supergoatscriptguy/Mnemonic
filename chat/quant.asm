@@ -299,7 +299,7 @@ q4_row_fit:
     ret
 
 ; rcx = f32 vector, rdx = n (a multiple of 32), r8 = int8 out, r9 = scale per group out.
-; each group of 32: scale = max |x| / 127, q = round(x / scale)
+; each group of 32: scale = max |x| / 127, q = round(x / scale). trashes xmm6-7 too
 global qx_vec
 qx_vec:
     vmovdqu ymm7, [perm]

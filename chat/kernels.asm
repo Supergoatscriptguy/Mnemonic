@@ -399,7 +399,9 @@ kern_name:
 .done:
     ret
 
-; rcx = matrix (MX_*), rdx = x (f32, cols), r8 = y (f32, rows). y = W x, on every thread
+; rcx = matrix (MX_*), rdx = x (f32, cols), r8 = y (f32, rows). y = W x, on every thread.
+; the row kernels use xmm6-15 as scratch without saving them, so nothing can be kept
+; there across this (or eng_step and the rest of the engine)
 global mv_run
 mv_run:
     push rbx
