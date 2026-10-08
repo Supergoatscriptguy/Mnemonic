@@ -4111,7 +4111,7 @@ mutline:
     push r13
     push r14
     push r15
-    sub rsp, 32
+    sub rsp, 64
     mov r12, rcx
     mov r13, rdx
     mov rbx, r8
@@ -4161,17 +4161,17 @@ mutline:
     mov rax, [rbx+16]
     shr rax, 32
     and eax, 0xffff
-    mov [rsp+24], rax           ; (no calls till .rest's isw, which is a leaf)
+    mov [rsp+32], rax
     mov rcx, r15
 .s:
-    cmp rcx, [rsp+24]
+    cmp rcx, [rsp+32]
     jae .rest
     mov al, [r12+rcx]
     cmp al, '*'
     jne .sput
     lea rdx, [rcx+1]
 .sw:
-    cmp rdx, [rsp+24]
+    cmp rdx, [rsp+32]
     jae .sput
     cmp byte [r12+rdx], ' '
     je .swn
@@ -4190,7 +4190,7 @@ mutline:
     jne .sput0
 .sk:
     lea r8, [rdx+1]
-    cmp r8, [rsp+24]
+    cmp r8, [rsp+32]
     jae .sy
     mov r9, rcx
     movzx ecx, byte [r12+r8]
@@ -4219,28 +4219,28 @@ mutline:
     mov rax, [rbx+16]
     shr rax, 32
     and eax, 0xffff
-    mov [rsp+24], rax
+    mov [rsp+32], rax
     movzx eax, byte [rbx+9]
     lea rsi, [argr]
     lea rsi, [rsi+rax*8]        ; A, and B 4 after it
     mov r14, rsi
     mov rcx, r15
 .a:
-    cmp rcx, [rsp+24]
+    cmp rcx, [rsp+32]
     jae .rest
-    mov [rsp+16], rcx
+    mov [rsp+40], rcx
     ; a word boundary before?
     test rcx, rcx
     jz .a1
     movzx ecx, byte [r12+rcx-1]
     call isw
-    mov rcx, [rsp+16]
+    mov rcx, [rsp+40]
     test eax, eax
     jnz .aput
 .a1:
     lea rcx, [r12+rcx]
-    mov rdx, [rsp+24]
-    sub rdx, [rsp+16]
+    mov rdx, [rsp+32]
+    sub rdx, [rsp+40]
     mov r8, r14
     call istarts
     test eax, eax
@@ -4248,12 +4248,12 @@ mutline:
     ; and after
     mov rdx, rcx
     sub rdx, r12
-    cmp rdx, [rsp+24]
+    cmp rdx, [rsp+32]
     jae .ahit
-    mov [rsp+8], rdx
+    mov [rsp+48], rdx
     movzx ecx, byte [rcx]
     call isw
-    mov rdx, [rsp+8]
+    mov rdx, [rsp+48]
     test eax, eax
     jnz .aput0
 .ahit:
@@ -4262,7 +4262,7 @@ mutline:
     mov rcx, rdx
     jmp .a
 .aput0:
-    mov rcx, [rsp+16]
+    mov rcx, [rsp+40]
 .aput:
     mov al, [r12+rcx]
     mov [rdi], al
@@ -4270,7 +4270,7 @@ mutline:
     inc rcx
     jmp .a
 .rest:
-    mov r15, [rsp+24]
+    mov r15, [rsp+32]
 .tail:
     ; the rest of the line from r15 (opend, or restend after a rewrite of the rest)
     mov rcx, r13
@@ -4279,7 +4279,7 @@ mutline:
     rep movsb
 .r:
     mov rax, rdi
-    add rsp, 32
+    add rsp, 64
     pop r15
     pop r14
     pop r13
@@ -4348,7 +4348,7 @@ apply:
     push r13
     push r14
     push r15
-    sub rsp, 48
+    sub rsp, 64
     mov rbx, rcx
     mov r12, rdx
     mov r13, r8
@@ -4388,14 +4388,14 @@ apply:
     cmp r15, [r13]
     jb .copy
     ; the pops that went with the removed push
-    mov [rsp+24], rcx
+    mov [rsp+48], rcx
     movzx eax, byte [r13+9]
     lea r8, [saved]
     lea r8, [r8+rax*4]
     mov rdx, rcx
     mov rcx, rsi
     call is_pop
-    mov rcx, [rsp+24]
+    mov rcx, [rsp+48]
     test eax, eax
     jnz .next
 .copy:
@@ -4409,7 +4409,7 @@ apply:
     mov rax, [rsp+32]
     mov rdx, rdi
     sub rdx, rax
-    add rsp, 48
+    add rsp, 64
     pop r15
     pop r14
     pop r13
