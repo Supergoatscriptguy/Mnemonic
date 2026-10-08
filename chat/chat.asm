@@ -31,6 +31,7 @@ s_qt     db "f32", 0, 0, 0, 0, 0, "int8", 0, 0, 0, 0, "int4", 0
 e_tok    db "can't load the tokenizer", 0
 e_hash   db "the model was made with a different tokenizer", 0
 e_eval   db "can't read the eval file", 0
+e_block  db "that file is packed in blocks of a different length than this model's context", 0
 align 8
 c_temp   dq 0.7
 c_topp   dq 0.9
@@ -421,6 +422,15 @@ evaluate:
     call fatal
 .mapped:
     mov rsi, rax
+    ; a chatpack'd file only lines up in rows of its own block, like in training
+    mov rcx, [rsi+TF_BLOCK]
+    test rcx, rcx
+    jz .rows
+    cmp rcx, [eng+EN_T]
+    je .rows
+    lea rcx, [e_block]
+    call fatal
+.rows:
     mov r15, [rsi+TF_FLAGS]
     and r15, 1                  ; chat?
     add rsi, TF_SIZE
