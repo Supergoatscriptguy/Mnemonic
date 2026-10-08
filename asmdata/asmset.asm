@@ -2844,6 +2844,7 @@ nth_call:
     push r14
     sub rsp, 40
     mov r12, rcx
+    mov r13, rdx
     mov r14, r8
     mov rsi, [rdx+LS_TESTS]
     mov rdi, [rdx+LS_TESTS+8]
@@ -2901,6 +2902,16 @@ nth_call:
     xor eax, eax
     xor edx, edx
 .r:
+    ; that parsed over test 0 and the byte buffers, and mutate_one's next vf_verify
+    ; writes tests.inc from them: put the lesson's tests back
+    mov rbx, rax
+    mov rsi, rdx
+    mov rcx, r12
+    mov rdx, [r13+LS_TESTS]
+    mov r8, [r13+LS_TESTS+8]
+    call vf_tests
+    mov rax, rbx
+    mov rdx, rsi
     add rsp, 40
     pop r14
     pop r13
