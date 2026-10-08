@@ -206,9 +206,13 @@ start:
     mov ecx, TOK_BOS
     call tok_bytes
     mov rsi, rax
+    mov r8d, edx                ; and it's exactly those 7 bytes
     lea rdi, [s_bos]
     mov ecx, 7
     repe cmpsb
+    jne .bosd
+    cmp r8d, 7
+.bosd:
     check e, "<|bos|> decodes to its name"
     mov ecx, 1 << 23            ; the round trips and the .tok walk both decode here
     call mem_alloc
