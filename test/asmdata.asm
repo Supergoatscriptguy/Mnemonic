@@ -94,6 +94,8 @@ k_int    db `f:  int 3\n    ret\n`
 k_int_n  equ $ - k_int
 k_lint   db `f: int 0x2e\n`
 k_lint_n equ $ - k_lint
+k_dint   db `f:\n    xor eax, eax\n.fail: int 0x29\n`
+k_dint_n equ $ - k_dint
 
 section .bss
 alignb 16
@@ -521,6 +523,11 @@ start:
     call code_check
     test rax, rax
     check nz, "int 0x2e"
+    lea rcx, [k_dint]
+    mov edx, k_dint_n
+    call code_check
+    test rax, rax
+    check nz, "a local .label then int 0x29"
     xor ecx, ecx
     xor edx, edx
     call code_check

@@ -1302,18 +1302,28 @@ code_check:
     lea rcx, [r_import]
     test eax, eax
     jnz .why
-    ; a label first is fine, then int and something
+    ; a label first is fine (.local ones too, and nasm's other label characters),
+    ; then int and something
     mov rcx, r13
 .lab:
     cmp rcx, rdi
     jae .int
     movzx eax, byte [rcx]
+    cmp eax, '.'
+    je .lc
+    cmp eax, '$'
+    je .lc
+    cmp eax, '?'
+    je .lc
+    cmp eax, '@'
+    je .lc
     mov r8, rcx
     mov ecx, eax
     call isword
     mov rcx, r8
     test eax, eax
     jz .colon
+.lc:
     inc rcx
     jmp .lab
 .colon:
