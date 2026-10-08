@@ -15,7 +15,7 @@ sn2      db 0x0c, 0x08, "abc", 0x15, 0x03           ; literal abc, then copy 9 f
 sn2_len  equ $ - sn2
 sn3      db 0x06, 0x08, "xyz", 0x0a, 0x03, 0x00     ; 2 byte offset copy
 sn3_len  equ $ - sn3
-sn4      db 0x05, 0x08, "abc", 0x15, 0x09           ; reaches back past the start
+sn4      db 0x0c, 0x08, "abc", 0x15, 0x09           ; reaches back past the start (room for it, so only that check can catch it)
 sn4_len  equ $ - sn4
 s_hello  db "hello"
 s_abc    db "abcabcabcabc"
