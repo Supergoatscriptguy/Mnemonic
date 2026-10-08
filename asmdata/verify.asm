@@ -1185,17 +1185,14 @@ code_of:
     jne .n
     mov rcx, rax
 .lang:
+    ; whatever names the language: nasm, asm, x86-64, x86_64...
     cmp rcx, rdi
     jae .no
     movzx eax, byte [rcx]
-    lea edx, [rax-'0']
-    cmp edx, 9
-    jbe .ln
-    or eax, 0x20
-    lea edx, [rax-'a']
-    cmp edx, 25
-    ja .sp
-.ln:
+    cmp eax, ' '
+    jbe .sp
+    cmp eax, '`'
+    je .sp
     inc rcx
     jmp .lang
 .sp:

@@ -101,6 +101,8 @@ k_lint   db `f: int 0x2e\n`
 k_lint_n equ $ - k_lint
 k_dint   db `f:\n    xor eax, eax\n.fail: int 0x29\n`
 k_dint_n equ $ - k_dint
+f_x8664  db "Here:", 10, "```x86-64", 10, "    mov eax, 1", 10, "    ret", 10, "```", 10, "Done.", 10
+f_x8664_n equ $ - f_x8664
 
 section .bss
 alignb 16
@@ -540,6 +542,16 @@ start:
     call vf_tests
     cmp rax, -1
     check e, "65 tests are too many"
+
+    lea rcx, [f_x8664]
+    mov edx, f_x8664_n
+    call code_of
+    mov rsi, rax
+    mov rcx, rdx
+    lea rdi, [tbuf]
+    rep movsb
+    mov rax, rdi
+    expect `    mov eax, 1\n    ret`
 
     say "code_check", 13, 10
     lea rcx, [k_ok]
