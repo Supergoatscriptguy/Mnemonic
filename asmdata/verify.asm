@@ -43,6 +43,7 @@ c_exe    db '\t.exe"', 0
 m_never  db "it never returned (ran for 5 seconds, probably an endless loop)", 0
 m_start  db "couldn't start it", 0
 m_that   db "    that line is: ", 0
+m_wfile  db "couldn't write the candidate's files in the work dir", 0
 m_in     db " in: ", 0
 e_link   db "can't find link.exe (vswhere found nothing)", 0
 e_harn   db "can't copy asmdata\harness.asm, run from the project folder", 0
@@ -277,7 +278,8 @@ vf_path:
     pop rbx
     ret
 
-; rcx = context, rdx = file name, r8 = data, r9 = length. written into the work dir
+; rcx = context, rdx = file name, r8 = data, r9 = length. written into the work dir.
+; eax = 1 if it all got there
 wfile:
     push rbx
     push rsi
@@ -295,9 +297,14 @@ wfile:
     mov rdx, rsi
     mov r8, rdi
     call file_write
+    mov esi, eax
     mov rcx, rbx
     call file_close
+    mov eax, esi
+    jmp .ret
 .no:
+    xor eax, eax
+.ret:
     add rsp, 32
     pop rdi
     pop rsi
@@ -561,6 +568,8 @@ vf_verify:
     mov r8, [rbx+VC_FILE]
     lea r9, [r12+1]
     call wfile
+    test eax, eax
+    jz .nofile
     ; the thunk gives it a name that can't clash with the harness
     mov rdi, [rbx+VC_FILE]
     emit "bits 64", 10, "extern "
@@ -574,6 +583,8 @@ vf_verify:
     lea rdx, [f_thunk]
     mov r8, [rbx+VC_FILE]
     call wfile
+    test eax, eax
+    jz .nofile
     mov rcx, rbx
     call vf_inc
     mov r9, rax
@@ -581,6 +592,8 @@ vf_verify:
     lea rdx, [f_inc]
     mov r8, [rbx+VC_FILE]
     call wfile
+    test eax, eax
+    jz .nofile
     ; nasm the candidate
     lea rdi, [rbx+VC_CMD]
     cat [c_q]
@@ -658,6 +671,16 @@ vf_verify:
     pop rsi
     pop rbx
     ret
+.nofile:
+    ; nasm would only build whatever the last one left there
+    mov rcx, [rbx+VC_OUT]
+    lea rdx, [m_wfile]
+    call fmt_str
+    mov byte [rax], 0
+    sub rax, [rbx+VC_OUT]
+    mov [rbx+VC_OLEN], rax
+    mov r12d, ST_INTERNAL
+    jmp .stage
 
 ; ecx = ST_*. rax = its name
 global vf_stage

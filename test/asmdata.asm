@@ -7,8 +7,11 @@ bits 64
 %include "asmdata/asmdata.inc"
 %include "test/check.inc"
 
+extern RemoveDirectoryA
+
 section .rdata
 d_work   db "scratch\asmgen\test", 0
+d_cand   db "scratch\asmgen\test\cand.asm", 0
 c_echo   db "cmd.exe /c echo hello", 0
 c_slow   db "cmd.exe /c ping -n 4 127.0.0.1", 0
 k_choice db "choices", 0
@@ -498,6 +501,15 @@ start:
     call contains
     cmp eax, 1
     check e, "  at the buffer"
+    ; cand.asm can't be written (a directory in the way): that's on us, and the last
+    ; one's cand.asm mustn't get built instead
+    lea rcx, [d_cand]
+    call file_delete
+    lea rcx, [d_cand]
+    call make_dir
+    build v_up, v_up_n, ST_INTERNAL, "cand.asm can't be written"
+    lea rcx, [d_cand]
+    call RemoveDirectoryA
     ; 64 tests is the most, and a line after the 64th isn't a 65th
     lea rdi, [big]
     mov ebx, 64
