@@ -2519,6 +2519,50 @@ bug_question:
     pop rbx
     ret
 
+; rcx = text, rdx = length, r8 = lowercase word. hasword, but not inside `code`, where
+; test is the instruction
+proseword:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub rsp, 40
+    mov rsi, rcx
+    lea rdi, [rcx+rdx]
+    mov r12, r8
+.seg:
+    mov rbx, rsi
+.e:
+    cmp rbx, rdi
+    jae .look
+    cmp byte [rbx], '`'
+    je .look
+    inc rbx
+    jmp .e
+.look:
+    mov rcx, rsi
+    mov rdx, rbx
+    sub rdx, rsi
+    mov r8, r12
+    call hasword
+    test eax, eax
+    jnz .r
+    lea rsi, [rbx+1]
+.code:
+    cmp rsi, rdi
+    jae .r
+    cmp byte [rsi], '`'
+    lea rsi, [rsi+1]
+    jne .code
+    jmp .seg
+.r:
+    add rsp, 40
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
 ; fixes*.jsonl: the ones whose lesson is in training, whose code changed and still
 ; fails the final tests, become debug conversations
 fix_convs:
@@ -2579,14 +2623,14 @@ fix_convs:
     mov rcx, [rsi+FX_WHY]
     mov rdx, [rsi+FX_WHY+8]
     lea r8, [w_test]
-    call hasword
+    call proseword
     lea rdx, [r_ftest]
     test eax, eax
     jnz .drop
     mov rcx, [rsi+FX_WHY]
     mov rdx, [rsi+FX_WHY+8]
     lea r8, [w_tests]
-    call hasword
+    call proseword
     lea rdx, [r_ftest]
     test eax, eax
     jnz .drop
