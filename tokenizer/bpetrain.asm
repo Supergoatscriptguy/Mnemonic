@@ -17,6 +17,7 @@ k_out    db "out", 0
 k_naive  db "naive", 0
 d_out    db "datasets\tokenizer.bin", 0
 s_vocab  db ".vocab.txt", 0
+s_tmp    db ".tmp", 0
 usage    db "usage: bpetrain file.docs ... [bytes=1e9] [merges=32496] [out=...] [naive=0]", 13, 10, 0
 e_docs   db "not a .docs file", 0
 e_write  db "couldn't write the tokenizer", 0
@@ -32,6 +33,7 @@ docs     resq 1
 tbytes   resq 1
 outp     resq 1
 vpath    resb 1024
+tmpp     resb 1024
 tsoff    resq 1
 tslen    resq 1
 tsblob   resq 1
@@ -213,7 +215,15 @@ start:
     shl rdx, 2
     call whash
     mov [hdr+TKH_HASH], rax
-    mov rcx, [outp]
+    ; into out.tmp, then renamed over out, so a failed write leaves the old one
+    lea rcx, [tmpp]
+    mov rdx, [outp]
+    call fmt_str
+    mov rcx, rax
+    lea rdx, [s_tmp]
+    call fmt_str
+    mov byte [rax], 0
+    lea rcx, [tmpp]
     call file_create
     cmp rax, -1
     je .werr
@@ -222,13 +232,24 @@ start:
     lea rdx, [hdr]
     mov r8d, TKH_SIZE
     call file_write
+    test eax, eax
+    jz .werr
     mov rcx, rbx
     mov rdx, [job+BT_MERGES]
     mov r8, [job+BT_DONE]
     shl r8, 2
     call file_write
+    test eax, eax
+    jz .werr
+    mov rcx, rbx
+    call file_flush
     mov rcx, rbx
     call file_close
+    lea rcx, [tmpp]
+    mov rdx, [outp]
+    call file_replace
+    test eax, eax
+    jz .werr
     say "  wrote "
     mov rcx, [outp]
     call print_z
