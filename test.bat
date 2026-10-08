@@ -61,6 +61,8 @@ echo == nasm lesson tools (builds and runs candidates)
 bin\asmdata.exe || set BAD=1
 echo == the webassembly engine vs bin\chat
 node site\test.mjs threads=12 || set BAD=1
+echo == the same with int4 weights
+node site\test.mjs threads=12 model=models\mnemonic-q4.mnm tol=2e-3 || set BAD=1
 
 :done
 echo.

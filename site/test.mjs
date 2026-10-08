@@ -1,5 +1,7 @@
 // checks the webassembly engine against the x86 one (bin\chat).
-//   node site\test.mjs [model=models\mnemonic-q8.mnm] [rows=1] [threads=all] [docs=2000]
+//   node site\test.mjs [model=models\mnemonic-q8.mnm] [rows=1] [threads=all] [docs=2000] [tol=5e-4]
+// tol is how far the two losses may be apart. int4 needs more: the engines' int4 math
+// lands ~8e-4 apart on the 126M, against ~1e-5 for int8
 // the wasm runs exactly as on the page: one driver, helpers in worker threads,
 // one shared memory
 import { readFileSync } from 'node:fs'
@@ -126,7 +128,7 @@ const threads = e.set_threads(want)
   const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, 'eval=datasets\\chat\\val.tok', `rows=${rows}`], { cwd: root }).toString()
   const m = out.match(/loss ([\d.]+) over (\d+) targets, ([\d.]+) tok\/s/)
   const loss = sum / cnt
-  check(m && +m[2] === cnt && Math.abs(loss - +m[1]) < 5e-4,
+  check(m && +m[2] === cnt && Math.abs(loss - +m[1]) < +arg('tol', 5e-4),
     `loss ${loss.toFixed(5)} over ${cnt} targets, bin\\chat says ${m ? m[1] : '?'} (${rows} row${rows > 1 ? 's' : ''})`)
   console.log(`        wasm ${(rows * T / secs).toFixed(1)} tok/s on ${threads} threads, bin\\chat ${m ? m[3] : '?'} tok/s`)
 }
