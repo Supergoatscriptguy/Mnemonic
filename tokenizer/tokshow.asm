@@ -19,6 +19,7 @@ d_tok    db "datasets\tokenizer.bin", 0
 usage    db 'usage: tokshow "text" | tokshow file.docs N  [tok=...]', 13, 10, 0
 e_tok    db "can't load the tokenizer (train one with bpetrain)", 0
 e_docs   db "can't open that .docs file", 0
+empty    db 0
 ; background colors (256 color codes, as text), plain and for targets
 pal      db "24 ", "58 ", "53 ", "23 ", "94 ", "60 "
 tpal     db "22 ", "28 ", "22 ", "28 ", "22 ", "28 "
@@ -60,13 +61,20 @@ start:
     inc r12
     jmp .which
 .which1:
-    call cfg_args
-    cmp byte [isf+1], 0
-    jne .go
+    cmp qword [argc], 2
+    jae .args
     lea rcx, [usage]
     call print_z
     mov ecx, 1
     call ExitProcess
+.args:
+    ; the first arg is the text (or the file) even with an = in it, so cfg_args
+    ; doesn't get to cut it up as key=value
+    mov rbx, [argv+8]
+    lea rax, [empty]
+    mov [argv+8], rax
+    call cfg_args
+    mov [argv+8], rbx
 .go:
     lea rcx, [k_tok]
     lea rdx, [d_tok]
