@@ -136,6 +136,7 @@ r_ftest   db "fix: the explanation is about a test", 0
 r_flink   db "fix: link error blamed on something else", 0
 r_fout    db "fix: broken code reaches outside", 0
 r_fpass   db "fix: the old code passes the final tests", 0
+r_fint    db "fix: couldn't run the check", 0
 r_mfmt    db "mutant: explanation off format", 0
 r_fails   db "fails now: ok", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
           db "fails now: assemble", 0, 0, 0, 0, 0
@@ -2719,6 +2720,12 @@ check_fixes:
     mov [rbx+FX_DROP], rax
     jmp .n
 .err:
+    cmp eax, ST_INTERNAL        ; nasm or the harness didn't run, so no symptom to show
+    jne .txt
+    lea rax, [r_fint]
+    mov [rbx+FX_DROP], rax
+    jmp .n
+.txt:
     mov rcx, r12
     mov rdx, [rbx+FX_LS]
     call errtext
