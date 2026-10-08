@@ -467,7 +467,7 @@ put_tok:
     push rsi
     push r12
     push r13
-    sub rsp, 40
+    sub rsp, 32
     mov rax, [tsoff]
     mov esi, [rax+rcx*4]
     add rsi, [tsblob]
@@ -538,7 +538,7 @@ put_tok:
 .end:
     mov byte [rdi], "'"
     inc rdi
-    add rsp, 40
+    add rsp, 32
     pop r13
     pop r12
     pop rsi
