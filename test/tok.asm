@@ -315,8 +315,12 @@ start:
     cmp r13, r14
     jae .tend
     cmp word [r13], TOK_BOS
-    jne .tfail
+    je .bos
+    inc qword [bad]             ; no <|bos|>: count it, and take what's here up to the next one
+    jmp .from
+.bos:
     add r13, 2
+.from:
     mov r15, r13
 .tscan:
     cmp r15, r14
