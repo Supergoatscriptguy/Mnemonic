@@ -551,7 +551,9 @@ copy_one:
     mov rbx, r8
     mov rcx, rdx
     mov rdx, r8
+    sub rsp, 32
     call utf8_ok
+    add rsp, 32
     mov rcx, rbx
     rep movsb
     pop rdi
