@@ -163,8 +163,9 @@ start:
     mov rax, [ndocs]
     mov [job+BT_NDOCS], rax
     mov rcx, [job+BT_NMERGES]
-    shl rcx, 2
+    lea rcx, [rcx*4+8]          ; whash's tail load reads up to 8 bytes back, so some room in front
     call mem_alloc
+    add rax, 8
     mov [job+BT_MERGES], rax
     mov rcx, [job+BT_NMERGES]
     shl rcx, 3
