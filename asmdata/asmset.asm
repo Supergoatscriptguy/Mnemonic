@@ -1142,6 +1142,34 @@ shingles:
     cmp ecx, 9
     jne .line                   ; a letter run then something else, like a label
 .ms:
+    ; not a directive, they're the same in every lesson
+    lea rdx, [dirs]
+.d1:
+    cmp byte [rdx], 0
+    je .mk
+    mov rcx, r9
+.d2:
+    movzx r11d, byte [rdx]
+    inc rdx
+    test r11d, r11d
+    jz .d3
+    cmp rcx, r10
+    jae .d4
+    movzx edi, byte [rcx]
+    or edi, 0x20
+    inc rcx
+    cmp edi, r11d
+    je .d2
+.d4:
+    cmp byte [rdx], 0           ; on to the next one
+    lea rdx, [rdx+1]
+    jne .d4
+    jmp .d1
+.d3:
+    cmp rcx, r10
+    je .line
+    jmp .d1
+.mk:
     mov byte [r10], ' '
     inc r10
 .mr:
@@ -4537,6 +4565,7 @@ fixtext:
 
 section .rdata
 roles     db "user:", 0, "assistant:", 0, "system:", 0, 0
+dirs      db "bits", 0, "default", 0, "section", 0, "global", 0, "extern", 0, 0
 hdr1      db "# made by bin\asmset, don't edit", 10, 10
 hdr1_n    equ $ - hdr1
 hdr2      db "# made by bin\asmset: the NASM-Eval lessons, for the loss", 10, 10
