@@ -17,7 +17,8 @@ SV_STEP    equ 0
 SV_SEEN    equ 8
 SV_ELAPSED equ 16
 SV_RNG     equ 24
-SV_SIZE    equ 56
+SV_LOSS    equ 56               ; for a stop on the last step: the resume goes straight to the end
+SV_SIZE    equ 64
 
 section .rdata
 cfgpath  db "test\progress.cfg", 0
@@ -137,6 +138,8 @@ start:
     movdqu [rng], xmm0
     movdqu xmm0, [rax+SV_RNG+16]
     movdqu [rng+16], xmm0
+    mov rcx, [rax+SV_LOSS]
+    mov [stats+PS_LOSS], rcx
     mov rcx, rax
     call mem_free
     lea rcx, [m_resume]
@@ -337,6 +340,8 @@ save:
     movdqu [sv+SV_RNG], xmm0
     movdqu xmm0, [rng+16]
     movdqu [sv+SV_RNG+16], xmm0
+    mov rax, [stats+PS_LOSS]
+    mov [sv+SV_LOSS], rax
 
     lea rcx, [statetmp]
     call file_create
