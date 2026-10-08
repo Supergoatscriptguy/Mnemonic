@@ -360,7 +360,7 @@ kern_pick:
     mov qword [kpath], 0
     jmp .set
 .v:
-    cmp byte [rax+5], '8'       ; vnni8
+    cmp byte [rax+4], '8'       ; vnni8
     je .v8
     mov qword [kpath], 1
     jmp .set
