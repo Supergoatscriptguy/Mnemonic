@@ -1,8 +1,8 @@
 ; harness for generated NASM functions. runs the tests in tests.inc (written by
 ; verify.asm from the model's test lines) against the function it names. before each
 ; call every register the win64 abi says must survive gets a canary, and after it
-; they're all checked, plus rsp and the direction flag. prints what went wrong so the
-; model can be shown its mistake.
+; they're all checked, plus rsp, the direction flag, mxcsr's control bits and the x87
+; control word. prints what went wrong so the model can be shown its mistake.
 ; exit code: 0 all passed, 1 wrong results, 2 broke the abi, 3 crashed.
 ; verify.asm builds it next to each candidate, build.bat doesn't
 default rel
@@ -45,6 +45,8 @@ m_npres  db " was not preserved (the win64 abi says it must be)", 0
 m_xmm    db "xmm6-xmm15 were not preserved (the win64 abi says they must be)", 0
 m_rsp    db "rsp was different after the call returned (unbalanced push/pop or stack adjust)", 0
 m_df     db "the direction flag was left set (it must be clear when the function returns)", 0
+m_mxcsr  db "the mxcsr control bits (rounding, flush to zero, exception masks) were changed (the win64 abi says they must be preserved)", 0
+m_fpcw   db "the x87 control word was changed (the win64 abi says it must be preserved)", 0
 m_ok     db "all tests passed: ", 0
 m_crash  db "crashed with exception 0x", 0
 m_in     db " (", 0
@@ -61,6 +63,10 @@ rec      resq 1
 saved    resq 1                 ; rsp at the call
 retval   resq 1
 rflags   resq 1
+mx0      resd 1                 ; mxcsr and the x87 control word, before and after
+mx1      resd 1
+cw0      resw 1
+cw1      resw 1
 got      resq 8
 fails    resq 1
 abibad   resq 1
@@ -109,6 +115,8 @@ __harness_start:
     movdqa xmm13, [canx+112]
     movdqa xmm14, [canx+128]
     movdqa xmm15, [canx+144]
+    stmxcsr [mx0]
+    fnstcw [cw0]
     mov [saved], rsp
     cld
     call __entry
@@ -118,6 +126,8 @@ __harness_start:
     pop rax
     mov [rflags], rax
     cld
+    stmxcsr [mx1]
+    fnstcw [cw1]
     ; is the stack where we left it? if not, put it back
     cmp rsp, [saved]
     je .rspok
@@ -207,6 +217,25 @@ regs:
     call line
     mov qword [abibad], 1
 .x:
+    ; mxcsr's control bits (6-15, not the status flags) and the x87 control word.
+    ; put back for the next test
+    mov eax, [mx1]
+    xor eax, [mx0]
+    test eax, 0xffc0
+    jz .mx
+    lea rcx, [m_mxcsr]
+    call line
+    mov qword [abibad], 1
+    ldmxcsr [mx0]
+.mx:
+    mov ax, [cw1]
+    cmp ax, [cw0]
+    je .cw
+    lea rcx, [m_fpcw]
+    call line
+    mov qword [abibad], 1
+    fldcw [cw0]
+.cw:
     add rsp, 32
     pop rdi
     pop rsi
