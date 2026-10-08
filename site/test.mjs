@@ -64,6 +64,8 @@ const bytes = t => new Uint8Array(mem.buffer, e.tok_bytes(t), e.tok_len(t))
     for (let k = 0; k < got.length; k++) if (got[k] !== tv[pos + k]) { first = i; break }
     pos += got.length; n += got.length; bytesIn += b - a
   }
+  // a doc that came out short only shows at the next <|bos|>, which the last one doesn't have
+  if (first < 0 && tv[pos] !== 32752 && pos !== tv.length) first = want - 1
   const secs = (performance.now() - t0) / 1000
   check(first < 0, `${want} validation docs (${(bytesIn / 1e6).toFixed(1)} MB) encode to the same ${n} tokens as bin\\tokenize` +
     (first >= 0 ? `, first mismatch in doc ${first}` : `, ${(bytesIn / 1e6 / secs).toFixed(1)} MB/s`))
