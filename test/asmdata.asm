@@ -28,6 +28,8 @@ s_rbx    db "rbx was not preserved", 0
 s_ret    db ": returned ", 0
 s_err    db "cand.asm:1: error", 10
 s_err_n  equ $ - s_err
+s_t1     db "f(1) -> 1", 10
+s_t1_n   equ $ - s_t1
 
 ; a whole answer, the way the teacher writes one
 answer   db `Sure, here it is.\r\n\r\n### TASK\r\nAdd up n 32-bit integers.\r\n\r\n## **Signature**\r\n`
@@ -496,6 +498,36 @@ start:
     call contains
     cmp eax, 1
     check e, "  at the buffer"
+    ; 64 tests is the most, and a line after the 64th isn't a 65th
+    lea rdi, [big]
+    mov ebx, 64
+.t64:
+    lea rsi, [s_t1]
+    mov ecx, s_t1_n
+    rep movsb
+    dec ebx
+    jnz .t64
+    mov dword [rdi], `\`\`\`\n`
+    add rdi, 4
+    mov rbx, rdi
+    mov rcx, [ctx]
+    lea rdx, [big]
+    mov r8, rdi
+    sub r8, rdx
+    call vf_tests
+    cmp rax, 64
+    check e, "64 tests, then a closing fence"
+    lea rsi, [s_t1]             ; and with a 65th test
+    mov rdi, rbx
+    mov ecx, s_t1_n
+    rep movsb
+    mov rcx, [ctx]
+    lea rdx, [big]
+    mov r8, rdi
+    sub r8, rdx
+    call vf_tests
+    cmp rax, -1
+    check e, "65 tests are too many"
 
     say "code_check", 13, 10
     lea rcx, [k_ok]

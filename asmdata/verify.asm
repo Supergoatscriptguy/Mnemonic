@@ -201,7 +201,7 @@ vf_new:
     mov ecx, OUTSZ
     call mem_alloc
     mov [rbx+VC_NOTE], rax
-    mov ecx, MAXTESTS * TS_SIZE
+    mov ecx, (MAXTESTS + 1) * TS_SIZE   ; a spare, vf_tests parses into it before it knows
     call mem_alloc
     mov [rbx+VC_TESTS], rax
     mov ecx, AREA + 64
@@ -2641,9 +2641,6 @@ vf_tests:
     inc rdi
     jmp .eol
 .got:
-    lea rdx, [p_lots]
-    cmp r13, MAXTESTS
-    jae .err
     mov r9, r13
     imul r9, r9, TS_SIZE
     add r9, [rbx+VC_TESTS]
@@ -2655,6 +2652,9 @@ vf_tests:
     cmp eax, -1
     je .fail
     add r13d, eax
+    lea rdx, [p_lots]
+    cmp r13, MAXTESTS           ; a line after the 64th test is fine, a 65th test isn't
+    ja .err
     lea rsi, [rdi+1]
     jmp .line
 .done:
