@@ -37,6 +37,10 @@ zs1_len  equ $ - zs1
 zs2      db 0x28, 0xb5, 0x2f, 0xfd, 0x20, 11    ; claims 11 bytes, has 10
          db 0x28, 0, 0, "hello", 0x2b, 0, 0, "!"
 zs2_len  equ $ - zs2
+zs3      db 0x28, 0xb5, 0x2f, 0xfd, 0x20, 10    ; a compressed block (last, 5 bytes) whose
+         db 0x2d, 0, 0                          ; rle literals say 0xfffff bytes, past 128K
+         db 0xfd, 0xff, 0xff, "x", 0            ; (then no sequences)
+zs3_len  equ $ - zs3
 s_zs     db "hello!!!!!"
 
 fw       db "datasets\fineweb\shard_00000.parquet", 0
@@ -158,6 +162,14 @@ start:
     call zstd_decompress
     cmp rax, -1
     check e, "rejects a frame that isn't its stated size"
+    mov rcx, [zctx]
+    lea rdx, [outbuf]
+    mov r8d, 200
+    lea r9, [zs3]
+    mov qword [rsp+32], zs3_len
+    call zstd_decompress
+    cmp rax, -1
+    check e, "rejects rle literals bigger than 128K"
 
     lea rcx, [ar]
     mov rdx, 1 << 34

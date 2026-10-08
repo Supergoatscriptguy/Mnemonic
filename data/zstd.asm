@@ -767,6 +767,8 @@ lit_section:
     shr eax, 4
     mov r13d, 3
 .rawrle:
+    cmp rax, 128 * 1024         ; a block's literals are 128K at most, all ZS_LIT has room for
+    failif a
     mov [rbx+ZS_LITN], rax
     cmp ecx, 1
     je .rle
@@ -777,6 +779,9 @@ lit_section:
     failif a
     jmp .ret
 .rle:
+    lea rdx, [r13+1]            ; its one byte has to be in the block
+    cmp rdx, r12
+    failif a
     movzx edx, byte [rsi+r13]
     lea rdi, [rbx+ZS_LIT]
     mov [rbx+ZS_LITP], rdi
