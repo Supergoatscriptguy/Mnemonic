@@ -219,15 +219,18 @@ start:
     check e, "resumed run finishes with exit 0"
     lea rcx, [donepath]
     call file_read_all
-    test rax, rax
-    jz .nodone
-    mov rsi, rax
+    mov rbx, rax
+    test rbx, rbx
+    check nz, "resumed run writes its final state"
+    test rbx, rbx
+    jz .two
+    mov rsi, rbx
     lea rdi, [expected]
     mov ecx, 48
     repe cmpsb
-.nodone:
     check e, "ends bit-identical to the clean run (step, loss, rng)"
 
+.two:
     say "two ctrl+c", 13, 10
     call cleanup
     lea rcx, [slow]
