@@ -294,7 +294,7 @@ start:
     call Sleep
     mov rcx, r12
     call time_since
-    close_to 0.1, 0.06, "Sleep(50) measured in seconds"
+    close_to 0.058, 0.02, "Sleep(50) measured in seconds"   ; 50 ms plus up to a 15.6 ms tick
     mov rax, [qpc_freq]
     test rax, rax
     check nz, "qpc frequency is set"
