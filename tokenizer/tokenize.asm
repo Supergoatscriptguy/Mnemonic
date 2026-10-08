@@ -266,6 +266,8 @@ one_file:
     lea rdx, [hdr]
     mov r8d, TF_SIZE
     call file_write
+    test eax, eax
+    jz .werr
     xor r12d, r12d
 .wb:
     cmp r12, r15
@@ -283,6 +285,8 @@ one_file:
     inc r12
     jmp .wb
 .wdone:
+    mov rcx, rdi
+    call file_flush             ; on the disk before the rename makes it official
     mov rcx, rdi
     call file_close
     lea rcx, [tmppath]
