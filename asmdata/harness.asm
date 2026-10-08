@@ -55,6 +55,7 @@ cur      resq 1                 ; test number
 rec      resq 1
 saved    resq 1                 ; rsp at the call
 retval   resq 1
+rflags   resq 1
 got      resq 8
 fails    resq 1
 abibad   resq 1
@@ -106,7 +107,13 @@ __harness_start:
     mov [saved], rsp
     cld
     call __entry
-    ; first thing: is the stack where we left it? if not, put it back
+    ; first thing, before any call can touch them: the result and the flags
+    mov [retval], rax
+    pushfq
+    pop rax
+    mov [rflags], rax
+    cld
+    ; is the stack where we left it? if not, put it back
     cmp rsp, [saved]
     je .rspok
     mov rsp, [saved]
@@ -114,12 +121,8 @@ __harness_start:
     call line
     mov qword [abibad], 1
 .rspok:
-    mov [retval], rax
-    pushfq
-    pop rax
-    test eax, 0x400
+    test dword [rflags], 0x400
     jz .dfok
-    cld
     lea rcx, [m_df]
     call line
     mov qword [abibad], 1

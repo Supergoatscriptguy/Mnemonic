@@ -25,6 +25,7 @@ p_rawn   equ $ - p_raw
 s_that   db "that line is: mov eax, rcx", 0
 s_buf    db "the buffer in argument 1 is wrong at byte 0", 0
 s_rbx    db "rbx was not preserved", 0
+s_ret    db ": returned ", 0
 
 ; a whole answer, the way the teacher writes one
 answer   db `Sure, here it is.\r\n\r\n### TASK\r\nAdd up n 32-bit integers.\r\n\r\n## **Signature**\r\n`
@@ -46,6 +47,9 @@ v_abi    db `bits 64\nsection .text\nglobal sum32\nsum32:\n    xor eax, eax\n   
          db `    mov rbx, rcx\n.l:\n    movsxd r8, dword [rbx]\n    add rax, r8\n    add rbx, 4\n    dec rdx\n`
          db `    jnz .l\n.d:\n    ret\n`
 v_abi_n  equ $ - v_abi
+v_rsp    db `bits 64\nsection .text\nglobal sum32\nsum32:\n    xor eax, eax\n    test rdx, rdx\n    jz .d\n`
+         db `.l:\n    movsxd r8, dword [rcx]\n    add rax, r8\n    add rcx, 4\n    dec rdx\n    jnz .l\n.d:\n    ret 8\n`
+v_rsp_n  equ $ - v_rsp
 v_crash  db `bits 64\nsection .text\nglobal sum32\nsum32:\n    xor eax, eax\n    mov rax, [rax]\n    ret\n`
 v_crash_n equ $ - v_crash
 v_loop   db `bits 64\nsection .text\nglobal sum32\nsum32:\n    jmp sum32\n`
@@ -406,6 +410,14 @@ start:
     call contains
     cmp eax, 1
     check e, "  and the harness says so"
+    build v_rsp, v_rsp_n, ST_ABI, "right sums, but ret 8"
+    mov rcx, [ctx]
+    mov rdx, [rcx+VC_OLEN]
+    mov rcx, [rcx+VC_OUT]
+    lea r8, [s_ret]
+    call contains
+    test eax, eax
+    check z, "  and no wrong results reported for it"
     build v_crash, v_crash_n, ST_CRASH, "a null pointer"
     build v_loop, v_loop_n, ST_TIMEOUT, "an endless loop (5 seconds)"
     build v_asm, v_asm_n, ST_ASM, "mov eax, rcx doesn't assemble"
