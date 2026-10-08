@@ -29,7 +29,12 @@ C7 equ 0x5ca1ab1e00000b7b
 
 section .rdata
 align 16
-canx     times 10 dd 0x0ddba11, 0xf00dcafe, 0x5eed5eed, 0xabad1dea
+canx:                           ; a different one per register, so moving one into another shows
+%assign i 0
+%rep 10
+         dd 0x0ddba110 + i, 0xf00dcafe, 0x5eed5eed, 0xabad1dea
+%assign i i + 1
+%endrep
 regnames db "rbx rbp rsi rdi r12 r13 r14 r15 "
 m_test   db "test ", 0
 m_ret    db ": returned ", 0

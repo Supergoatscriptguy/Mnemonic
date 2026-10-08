@@ -50,6 +50,9 @@ v_abi_n  equ $ - v_abi
 v_rsp    db `bits 64\nsection .text\nglobal sum32\nsum32:\n    xor eax, eax\n    test rdx, rdx\n    jz .d\n`
          db `.l:\n    movsxd r8, dword [rcx]\n    add rax, r8\n    add rcx, 4\n    dec rdx\n    jnz .l\n.d:\n    ret 8\n`
 v_rsp_n  equ $ - v_rsp
+v_xmm    db `bits 64\nsection .text\nglobal sum32\nsum32:\n    movaps xmm7, xmm6\n    xor eax, eax\n    test rdx, rdx\n    jz .d\n`
+         db `.l:\n    movsxd r8, dword [rcx]\n    add rax, r8\n    add rcx, 4\n    dec rdx\n    jnz .l\n.d:\n    ret\n`
+v_xmm_n  equ $ - v_xmm
 v_crash  db `bits 64\nsection .text\nglobal sum32\nsum32:\n    xor eax, eax\n    mov rax, [rax]\n    ret\n`
 v_crash_n equ $ - v_crash
 v_loop   db `bits 64\nsection .text\nglobal sum32\nsum32:\n    jmp sum32\n`
@@ -418,6 +421,7 @@ start:
     call contains
     test eax, eax
     check z, "  and no wrong results reported for it"
+    build v_xmm, v_xmm_n, ST_ABI, "xmm6 copied over xmm7"
     build v_crash, v_crash_n, ST_CRASH, "a null pointer"
     build v_loop, v_loop_n, ST_TIMEOUT, "an endless loop (5 seconds)"
     build v_asm, v_asm_n, ST_ASM, "mov eax, rcx doesn't assemble"
