@@ -1391,8 +1391,10 @@ conv:
     mov r15, rdx
     mov r12, r8
     mov r13, r9
-    ; check both first
+    ; check both first. an empty one would come out as "."
     call trim
+    test rdx, rdx
+    jz .skip
     mov rcx, rax
     call okmsg
     test eax, eax
@@ -1400,6 +1402,8 @@ conv:
     mov rcx, r12
     mov rdx, r13
     call trim
+    test rdx, rdx
+    jz .skip
     mov rcx, rax
     call okmsg
     test eax, eax
