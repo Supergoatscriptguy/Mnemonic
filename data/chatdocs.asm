@@ -232,15 +232,21 @@ write:
 .same:
     mov rdx, [argv+8]
     call fmt_str
-    ; swap the extension (whatever follows the last dot) for .docs
+    ; swap the file name's extension for .docs, or add it if there's none
     mov rdi, rax
-    lea rcx, [outpath]
+    mov rcx, rax
 .dot:
-    cmp rdi, rcx
-    jbe .ext
-    dec rdi
-    cmp byte [rdi], '.'
+    dec rcx
+    lea rdx, [outpath]
+    cmp rcx, rdx
+    jb .ext
+    cmp byte [rcx], '\'
+    je .ext
+    cmp byte [rcx], '/'
+    je .ext
+    cmp byte [rcx], '.'
     jne .dot
+    mov rdi, rcx
 .ext:
     mov dword [rdi], '.doc'
     mov word [rdi+4], 's'
