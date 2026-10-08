@@ -662,6 +662,9 @@ vf_verify:
     mov r12d, ST_TIMEOUT
     cmp rax, -1
     je .stage
+    mov r12d, ST_INTERNAL       ; t.exe didn't start (Defender holding it, say), not its fault
+    cmp rax, -2
+    je .stage
     mov r12d, ST_CRASH
 .stage:
     mov eax, r12d
