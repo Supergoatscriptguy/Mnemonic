@@ -3886,8 +3886,8 @@ sites:
     cmp rax, r9
     jne .scale
     call .ws
-    cmp rdi, [rsp+48]
-    jne .scale
+    cmp rdi, [rsp+48]           ; past the rest's end is the comment
+    jb .scale
     xor ecx, ecx
 .i5:
     cmp rcx, r9
