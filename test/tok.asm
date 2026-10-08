@@ -210,6 +210,9 @@ start:
     mov ecx, 7
     repe cmpsb
     check e, "<|bos|> decodes to its name"
+    mov ecx, 1 << 23            ; the round trips and the .tok walk both decode here
+    call mem_alloc
+    mov [decb], rax
 
     ; round trips over a few thousand docs of a shard the tokenizer didn't train on
     lea rcx, [f_docs1]
@@ -225,9 +228,6 @@ start:
     mov ecx, 1 << 24
     call mem_alloc
     mov [enc2], rax
-    mov ecx, 1 << 23
-    call mem_alloc
-    mov [decb], rax
     mov qword [bad], 0
     xor r12d, r12d
     xor r13d, r13d              ; docs where the cache made a difference
