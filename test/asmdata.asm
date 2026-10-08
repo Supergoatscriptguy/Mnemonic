@@ -26,6 +26,8 @@ s_that   db "that line is: mov eax, rcx", 0
 s_buf    db "the buffer in argument 1 is wrong at byte 0", 0
 s_rbx    db "rbx was not preserved", 0
 s_ret    db ": returned ", 0
+s_err    db "cand.asm:1: error", 10
+s_err_n  equ $ - s_err
 
 ; a whole answer, the way the teacher writes one
 answer   db `Sure, here it is.\r\n\r\n### TASK\r\nAdd up n 32-bit integers.\r\n\r\n## **Signature**\r\n`
@@ -446,6 +448,36 @@ start:
     call contains
     cmp eax, 1
     check e, "  vf_note quotes the line"
+    ; quoted errors (437 bytes of note each) until it's just short of where vf_note
+    ; stops starting lines, then a 20000 byte line
+    mov rbx, [ctx]
+    mov rdi, [rbx+VC_OUT]
+    mov edx, 147
+.err:
+    lea rsi, [s_err]
+    mov ecx, s_err_n
+    rep movsb
+    dec edx
+    jnz .err
+    mov al, 'y'
+    mov ecx, 20000
+    rep stosb
+    mov byte [rdi], 10
+    inc rdi
+    sub rdi, [rbx+VC_OUT]
+    mov [rbx+VC_OLEN], rdi
+    lea rdi, [big]              ; the code: one 400 character line to quote
+    mov al, 'c'
+    mov ecx, 400
+    rep stosb
+    mov byte [rdi], 10
+    mov rcx, rbx
+    lea rdx, [big]
+    mov r8d, 401
+    call vf_note
+    mov rax, [ctx]
+    cmp qword [rax+VC_NLEN], 1 << 16
+    check be, "  vf_note stays inside its buffer"
     build v_link, v_link_n, ST_LINK, "no section .text doesn't link (nasm 3)"
     mov rcx, [ctx]
     lea rdx, [t_up]

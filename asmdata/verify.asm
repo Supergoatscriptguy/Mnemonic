@@ -715,6 +715,10 @@ vf_note:
 .copy:
     mov rcx, rdx
     sub rcx, rsi
+    cmp rcx, 512                ; with a quote under it, that still fits in the 1024 left
+    jbe .cl
+    mov ecx, 512
+.cl:
     mov [rsp+32], r8
     mov r9, rsi
     rep movsb
