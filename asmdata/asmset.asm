@@ -539,19 +539,19 @@ load_lesson:
 
 loader load_fix, fixes
 .fields:
-    sub rsp, 8
+    sub rsp, 40                 ; the jfield calls' shadow space, and aligned
     getf k_broken, FX_BROKEN
     getf k_wrong, FX_WHY
     mov rcx, rsi
     lea rdx, [k_stage]
     call jfield
     mov [rbx+FX_STAGE], rax
-    add rsp, 8
+    add rsp, 40
     ret
 
 loader load_mut, muts
 .fields:
-    sub rsp, 8
+    sub rsp, 40                 ; the jfield calls' shadow space, and aligned
     getf k_broken, FX_BROKEN
     getf k_err, FX_ERR
     mov rcx, rsi
@@ -562,18 +562,18 @@ loader load_mut, muts
     lea rdx, [k_op]
     call jfield
     mov [rbx+FX_OP], rax
-    add rsp, 8
+    add rsp, 40
     ret
 
 loader load_why, whys
 .fields:
-    sub rsp, 8
+    sub rsp, 40                 ; the jfield calls' shadow space, and aligned
     getf k_why, FX_WHY
     mov rcx, rsi
     lea rdx, [k_op]
     call jfield
     mov [rbx+FX_OP], rax
-    add rsp, 8
+    add rsp, 40
     ret
 
 ; rcx = id. rax = that lesson, or 0
