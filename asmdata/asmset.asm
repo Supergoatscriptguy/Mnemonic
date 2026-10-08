@@ -1280,10 +1280,11 @@ similar:
 ; rcx = path. opens wr
 wr_open:
     sub rsp, 40
+    mov [rsp+32], rcx
     call file_create
     cmp rax, -1
     jne .ok
-    lea rcx, [f_train]
+    mov rcx, [rsp+32]
     call fatal
 .ok:
     mov [wr+WR_H], rax
