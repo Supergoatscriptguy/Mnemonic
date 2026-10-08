@@ -123,6 +123,7 @@ vf_init:
     lea rdx, [nasm_exe]
     mov r8d, 400
     call GetEnvironmentVariableA
+    mov eax, eax                ; a DWORD, the top half of rax could be anything
     lea rcx, [nasm_exe]
     add rcx, rax
     lea rdx, [s_nasm]
@@ -132,7 +133,7 @@ vf_init:
     lea rdx, [sdk_dir]
     mov r8d, 300
     call GetEnvironmentVariableA
-    mov rbx, rax
+    mov ebx, eax
     lea rcx, [initcmd]
     mov byte [rcx], '"'
     inc rcx
