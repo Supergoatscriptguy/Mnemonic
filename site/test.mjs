@@ -87,10 +87,19 @@ const model = arg('model', 'models\\mnemonic-q8.mnm')
   if (r !== 1) process.exit(1)
 }
 
-// helpers
+// a stuck job blocks this thread inside the wasm for good, where no timer can run,
+// so a watchdog thread fails the test instead of letting test.bat hang
+new Worker(`
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000)
+  require('node:fs').writeSync(1, '  FAIL  stuck for 10 minutes, a job never finished\\n')
+  process.kill(process.pid)
+`, { eval: true }).unref()
+
+// helpers. their ids start at 1, as if the page's helper 0 never started: the engine
+// has to count only the helpers that are really there
 const want = +arg('threads', availableParallelism())
 const workers = []
-for (let i = 0; i < want - 1; i++) workers.push(new Worker(new URL(import.meta.url), { workerData: { module, mem, id: i } }))
+for (let i = 0; i < want - 1; i++) workers.push(new Worker(new URL(import.meta.url), { workerData: { module, mem, id: i + 1 } }))
 const ready = new Int32Array(mem.buffer, 320, 1)
 while (Atomics.load(ready, 0) < want - 1) await new Promise(r => setTimeout(r, 5))
 const threads = e.set_threads(want)

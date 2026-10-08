@@ -139,11 +139,12 @@
 
   ;; a helper worker calls this and never comes back. it reads GEN before it
   ;; counts itself ready, so it can't miss a job (jobs only start once the driver
-  ;; has set NHELP from READY)
+  ;; has set NHELP from READY). its slot is where it came in, not the page's id,
+  ;; so the NHELP helpers that take part are always ones that have started
   (func (export "helper") (param $id i32)
-    (local $seen i32) (local $g i32) (local $spin i32)
+    (local $seen i32) (local $g i32) (local $spin i32) (local $slot i32)
     (local.set $seen (i32.atomic.load (global.get $GEN)))
-    (drop (i32.atomic.rmw.add (global.get $READY) (i32.const 1)))
+    (local.set $slot (i32.atomic.rmw.add (global.get $READY) (i32.const 1)))
     (loop $forever
       (local.set $g (i32.atomic.load (global.get $GEN)))
       (if (i32.eq (local.get $g) (local.get $seen))
@@ -153,7 +154,7 @@
             (then (drop (memory.atomic.wait32 (global.get $GEN) (local.get $seen) (i64.const -1)))))
           (br $forever)))
       (local.set $seen (local.get $g))
-      (if (i32.lt_u (local.get $id) (i32.load (global.get $NHELP)))
+      (if (i32.lt_u (local.get $slot) (i32.load (global.get $NHELP)))
         (then
           (local.set $spin (i32.const 0))
           (call $work)
