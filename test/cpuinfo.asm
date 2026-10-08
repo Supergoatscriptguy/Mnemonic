@@ -90,5 +90,6 @@ start:
     call print_hex
     say 13, 10
 
+    call con_restore            ; the shell shares this console
     xor ecx, ecx
     call ExitProcess
