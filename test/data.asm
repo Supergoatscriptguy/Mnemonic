@@ -200,6 +200,9 @@ start:
     check e, "codec is zstd"
     mov rax, [pq+PQ_LEAF]
     cmp dword [rax+LF_MAXDEF], 1
+    jne .lvt
+    cmp dword [rax+LF_MAXREP], 0
+.lvt:
     check e, "text: def 1, rep 0"
     lea rcx, [pq]
     lea rdx, [col]
