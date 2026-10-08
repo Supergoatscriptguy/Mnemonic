@@ -1463,12 +1463,15 @@ okmsg:
     cmp al, '.'
     jne .roles
     lea rcx, [rsi+1]
+.dot:                           ; msg trims the line's end, so ". " ends up "." too
     cmp rcx, rdi
     jae .bad
     cmp byte [rcx], 10
     je .bad
-    cmp byte [rcx], 13
-    je .bad
+    cmp byte [rcx], ' '
+    ja .roles
+    inc rcx
+    jmp .dot
 .roles:
     lea rbx, [roles]
 .r:
