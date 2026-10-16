@@ -14,16 +14,17 @@ nvcuda.dll, which comes with the NVIDIA driver. I trained it on one RTX 5070 Ti 
 
 ## The models
 
-| | 126M | 300M |
-| --- | --- | --- |
-| Layers and width | 16 x 768 | 24 x 1024 |
-| Context | 1,024 tokens | 2,048 tokens |
-| Pretraining | 5B tokens of FineWeb-Edu, 19.5 hours | 10B tokens, 90 hours |
-| Validation loss | 3.101 | 2.841 |
+| | 126M | 300M | 755M |
+| --- | --- | --- | --- |
+| Layers and width | 16 x 768 | 24 x 1024 | 28 x 1536 |
+| Context | 1,024 tokens | 2,048 tokens | 2,048 tokens |
+| Pretraining | 5B tokens of FineWeb-Edu, 19.5 hours | 10B tokens, 90 hours | 15B tokens, 8.3 days in FP8 |
+| Validation loss | 3.101 | 2.841 | 2.633 |
 
-Both are Llama-style (RoPE, RMSNorm, SwiGLU, grouped-query attention, tied embeddings) with a 32,768-token
-vocabulary, and both were fine-tuned for chat on smol-smoltalk plus a small set of conversations about who the model
-is. They're small models: they write fluently, get facts wrong often, and can't do arithmetic.
+All three are Llama-style (RoPE, RMSNorm, SwiGLU, grouped-query attention, tied embeddings) with a 32,768-token
+vocabulary, and all three were fine-tuned for chat on smol-smoltalk plus a small set of conversations about who the
+model is. They're small models: they write fluently, get facts wrong often, and can't do arithmetic. Each one is
+noticeably better than the one before.
 
 ## What's in here
 
@@ -66,13 +67,13 @@ The browser demo and Ollama are the quickest ways. To run my own engine, build `
 .\build.bat chat\chat
 mkdir models
 mkdir datasets
-curl.exe -L -o models\mnemonic-300m-q8.mnm https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-300m-q8.mnm
+curl.exe -L -o models\mnemonic-755m-q8.mnm https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-755m-q8.mnm
 curl.exe -L -o datasets\tokenizer.bin https://mnemonic-site.vercel.app/tokenizer.bin
 .\bin\chat
 ```
 
-It runs on the CPU. On mine the 300M in int8 writes about 220 tokens a second and the 126M about 540. It takes
-`model=`, `temp=`, `top_p=` and `threads=`, and `/reset` starts a new conversation.
+It runs on the CPU. On mine the 755M in int8 writes about 85 tokens a second, the 300M about 220 and the 126M
+about 540. It takes `model=`, `temp=`, `top_p=` and `threads=`, and `/reset` starts a new conversation.
 
 ## Training it yourself
 
@@ -82,8 +83,9 @@ Each step is a program in this repo:
    `bin\download fineweb 1822 1822` the shard used for validation.
 2. `bin\extract` turns parquet files into plain documents, `bin\bpetrain` learns the tokenizer from the first
    gigabyte of them, and `bin\tokenize` turns the documents into token files.
-3. `bin\train dev` trains the 22M test model in under an hour. `bin\train main` trains the 126M and
-   `bin\train stretch` the 300M. Ctrl+C saves a checkpoint and stops, and the same command resumes.
+3. `bin\train dev` trains the 22M test model in under an hour. `bin\train main` trains the 126M,
+   `bin\train stretch` the 300M and `bin\train large` the 755M (that one needs FP8, so an RTX 50 series card, and
+   370 shards: `bin\download fineweb 0 369`). Ctrl+C saves a checkpoint and stops, and the same command resumes.
 4. `bin\train main gen="Once upon a time"` samples from your newest checkpoint.
 
 A pretrained model only continues text. The chat fine-tune, the quantizer and the GGUF export each have a chapter
@@ -94,6 +96,9 @@ on the site.
 `fp8=1` runs the matmuls inside the transformer layers in MXFP8 on RTX 50 series tensor cores: 8-bit values with a
 shared scale per 32, summed in fp32, with fp32 master weights. I retrained the 126M this way to compare. It ended at
 a validation loss of 3.105 against 3.101 in bf16, and took 14.4 hours instead of 19.5.
+
+The 755M was trained this way from the start. With FP8 and AdamW's moments kept in bf16 (`adam16=1`) it just fits
+in 16 GB, and it ran at about 21,000 tokens a second (106 TFLOPS) for 8.3 days.
 
 ## How it's checked
 
