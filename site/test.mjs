@@ -108,12 +108,14 @@ const ready = new Int32Array(mem.buffer, 320, 1)
 while (Atomics.load(ready, 0) < want - 1) await new Promise(r => setTimeout(r, 5))
 const threads = e.set_threads(want)
 
-// loss on the first rows of the chat val file, next to bin\chat's on the same rows
+// loss on the first rows of the chat val file, next to bin\chat's on the same rows.
+// the file packed for this model's context: bin\chat refuses any other
 {
   const rows = +arg('rows', 1)
-  const vf = readFileSync(path('datasets/chat/val.tok'))
-  const tv = new Uint16Array(vf.buffer, vf.byteOffset + 64, (vf.length - 64) >> 1)
   const T = e.eng_get(7)
+  const vname = T === 1024 ? 'val.tok' : `val${T}.tok`
+  const vf = readFileSync(path(`datasets/chat/${vname}`))
+  const tv = new Uint16Array(vf.buffer, vf.byteOffset + 64, (vf.length - 64) >> 1)
   let sum = 0, cnt = 0
   const t0 = performance.now()
   for (let r = 0; r < rows; r++) {
@@ -125,7 +127,7 @@ const threads = e.set_threads(want)
     }
   }
   const secs = (performance.now() - t0) / 1000
-  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, 'eval=datasets\\chat\\val.tok', `rows=${rows}`], { cwd: root }).toString()
+  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, `eval=datasets\\chat\\${vname}`, `rows=${rows}`], { cwd: root }).toString()
   const m = out.match(/loss ([\d.]+) over (\d+) targets, ([\d.]+) tok\/s/)
   const loss = sum / cnt
   check(m && +m[2] === cnt && Math.abs(loss - +m[1]) < +arg('tol', 5e-4),
