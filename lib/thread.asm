@@ -180,8 +180,9 @@ run_chunks:
     pop rbx
     ret
 
-; rcx = fn, rdx = ctx, r8 = count (under 2^32), r9 = chunk size.
-; calls fn(ctx, start, end, thread) over [0, count) on every thread, returns when all done
+; rcx = fn, rdx = ctx, r8 = count, r9 = chunk size, count + chunk <= 2^32 (a claim past it would
+; carry into the ticket's gen bits). calls fn(ctx, start, end, thread) over [0, count) on every
+; thread, returns when all done
 global par_for
 par_for:
     push rbx
