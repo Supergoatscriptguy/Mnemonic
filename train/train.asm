@@ -768,9 +768,11 @@ trainloop:
     jb .ntime
     or r13d, 2
 .ntime:
-    mov rax, [step]
-    cmp rax, [stopat]
-    jne .nstopat
+    mov rax, [stopat]           ; 0 = off. at or past it, so a resume beyond it stops too
+    test rax, rax
+    jz .nstopat
+    cmp [step], rax
+    jb .nstopat
     or r13d, 6
 .nstopat:
     cmp dword [stop_flag], 0
