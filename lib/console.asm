@@ -8,6 +8,8 @@ extern GetConsoleOutputCP, SetConsoleOutputCP, GetLastError, ExitProcess
 extern AddVectoredExceptionHandler, GetModuleHandleA
 extern ReadConsoleW, WideCharToMultiByte, ReadFile
 
+WLINE  equ 16384                ; utf-16 units of a console line (chat's buffer is 16K)
+
 section .bss
 con_out  resq 1
 con_tty  resd 1                 ; 1 if stdout is a real console, not a file or pipe
@@ -17,7 +19,8 @@ written  resd 1
 global con_intty
 con_intty resd 1                ; stdin is a console
 con_in   resq 1
-wline    resw 4096
+wline    resw WLINE
+wdrop    resw 256               ; where the rest of a too long line goes
 
 section .text
 
@@ -224,29 +227,73 @@ con_readline:
     je .bytes
     mov rcx, [con_in]
     lea rdx, [wline]
-    mov r8d, 4096
+    mov r8, r12                 ; units: no more than the caller has bytes
+    cmp r8, WLINE
+    jbe .rd
+    mov r8d, WLINE
+.rd:
     lea r9, [rsp+64]
     mov qword [rsp+32], 0
     call ReadConsoleW
     test eax, eax
     jz .eof
-    mov ecx, [rsp+64]           ; utf-16 units read
-    test ecx, ecx
+    mov edi, [rsp+64]           ; utf-16 units read
+    test edi, edi
     jz .eof
     lea rax, [wline]
     cmp word [rax], 26          ; ctrl+z
     je .eof
+    cmp word [rax+rdi*2-2], 10
+    je .conv
+    ; longer than that: the console keeps the rest, and the next read would get it
+    ; as a line of its own. read it and drop it
+.drain:
+    mov rcx, [con_in]
+    lea rdx, [wdrop]
+    mov r8d, 256
+    lea r9, [rsp+64]
+    mov qword [rsp+32], 0
+    call ReadConsoleW
+    test eax, eax
+    jz .half
+    mov eax, [rsp+64]
+    test eax, eax
+    jz .half
+    lea rcx, [wdrop]
+    cmp word [rcx+rax*2-2], 10
+    jne .drain
+.half:
+    ; a cut can land between the halves of a surrogate pair
+    test edi, edi
+    jz .conv
+    lea rax, [wline]
+    movzx ecx, word [rax+rdi*2-2]
+    and ecx, 0xfc00
+    cmp ecx, 0xd800
+    jne .conv
+    dec edi
+.conv:
     mov ecx, 65001              ; CP_UTF8
     xor edx, edx
     lea r8, [wline]
-    mov r9d, [rsp+64]
+    mov r9d, edi
     mov [rsp+32], rsi
     mov [rsp+40], r12
     mov qword [rsp+48], 0
     mov qword [rsp+56], 0
     call WideCharToMultiByte
     mov ebx, eax                ; an int: the top half of rax isn't promised
-    jmp .trim
+    test ebx, ebx
+    jnz .trim
+    ; it didn't fit (a unit can take 3 bytes): again with as many as surely do
+    mov rax, r12
+    xor edx, edx
+    mov ecx, 3
+    div rcx
+    cmp rax, rdi
+    jae .trim                   ; that was already all of them
+    mov edi, eax
+    jmp .half
 .bytes:
     ; a byte at a time until the newline (it's only for piped input)
     xor ebx, ebx

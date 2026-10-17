@@ -4,7 +4,7 @@ rem builds every test program and every tool, then runs the self-checking tests
 pushd "%~dp0"
 set BAD=0
 
-for %%t in (hello cpuinfo fmt sys rng threads progress ctrltest data tok gpu mx grad model infer asmdata) do (
+for %%t in (hello cpuinfo fmt sys conread rng threads progress ctrltest data tok gpu mx grad model infer asmdata) do (
     call .\build.bat test\%%t >nul || (echo build failed: %%t& set BAD=1)
 )
 rem the tools too, so nothing rots unnoticed
@@ -35,6 +35,8 @@ echo == fmt
 bin\fmt.exe || set BAD=1
 echo == sys
 bin\sys.exe lr=1e-3 foo="a b" || set BAD=1
+echo == console input
+bin\conread.exe || set BAD=1
 echo == rng
 bin\rng.exe || set BAD=1
 echo == threads
