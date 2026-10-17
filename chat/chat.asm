@@ -282,7 +282,7 @@ converse:
     call show
     inc r13
     cmp r13, [maxgen]
-    jae .end
+    jae .last
     mov rax, [eng+EN_POS]
     inc rax
     cmp rax, [eng+EN_T]
@@ -296,6 +296,15 @@ converse:
 .stopped:
     mov dword [stop_flag], 0
     say " ..."
+.last:
+    ; cut off: the token on the screen goes in the cache too, if <|end|> fits after it
+    mov rax, [eng+EN_POS]
+    add rax, 2
+    cmp rax, [eng+EN_T]
+    ja .end
+    mov ecx, ebx
+    xor edx, edx
+    call eng_step
 .end:
     ; the turn ends with <|end|> in the cache either way
     mov rax, [eng+EN_POS]
