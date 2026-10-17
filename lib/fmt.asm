@@ -17,6 +17,9 @@ one      dq 1.0
 ten      dq 10.0
 hundred  dq 100.0
 thousand dq 1000.0
+c9_995   dq 9.995
+c99_95   dq 99.95
+c999_5   dq 999.5
 hexdig   db "0123456789abcdef"
 sfx      db "KMBT", 0
 
@@ -259,11 +262,19 @@ fmt_count:
     inc r10
     jmp .scale
 .pick:
+    ; by where it rounds to: 999.7K is 1.00M, 9.997 gets one decimal
+    comisd xmm1, [c999_5]
+    jb .dec
+    cmp byte [r10+1], 0
+    je .dec
+    divsd xmm1, xmm2
+    inc r10
+.dec:
     mov r8d, 2
-    comisd xmm1, [ten]
+    comisd xmm1, [c9_995]
     jb .go
     dec r8d
-    comisd xmm1, [hundred]
+    comisd xmm1, [c99_95]
     jb .go
     dec r8d
 .go:
