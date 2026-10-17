@@ -1572,9 +1572,12 @@ save:
     lea rdx, [msg]
     lea r8, [cktmp]
     call ck_save
-    lea rcx, [ckpat]
     mov rdx, [keep]
+    test rdx, rdx               ; keep=0 keeps them all (prune would take the new one too)
+    jz .kept
+    lea rcx, [ckpat]
     call ck_prune
+.kept:
     lea rdi, [msg+2048]
     emit "  ", 27, "[90msaved step "
     mov rcx, rdi
