@@ -75,6 +75,7 @@ start:
 
 section .rdata
 m_same db "both end on the same weights, adam state, step, data position and rng, bit for bit", 0
+s_at17 db "start step=17", 13, 10, 0
 section .text
 
 ; rcx = a set (see set_bf)
@@ -110,6 +111,14 @@ round:
     call run
     test eax, eax
     check z, "resumed run, from 17 to 40"
+    ; a run that started over would end on the same bytes too
+    mov rcx, [rbx+48]
+    call file_read_all
+    mov rcx, rax
+    lea r8, [s_at17]
+    call has
+    test eax, eax
+    check nz, "and it really started at 17 (its log says so)"
 
     ; same bytes, apart from the wall clock time in the header
     mov rcx, [rbx+64]
@@ -197,6 +206,32 @@ parts:
     pop rdi
     pop rsi
     pop rbx
+    ret
+
+; rcx = text, rdx = its length, r8 = zero-terminated literal. eax = 1 if it's in there
+has:
+    xor r10d, r10d              ; where it might start
+.at:
+    xor r11d, r11d
+.c:
+    movzx eax, byte [r8+r11]
+    test eax, eax
+    jz .yes
+    lea r9, [r10+r11]
+    cmp r9, rdx
+    jae .no
+    cmp al, [rcx+r9]
+    jne .next
+    inc r11
+    jmp .c
+.next:
+    inc r10
+    jmp .at
+.yes:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
     ret
 
 ; rcx = pattern. deletes whatever matches

@@ -69,6 +69,7 @@ save_ev  resq 1
 seed     resq 1
 max_lr   resq 1
 logh     resq 1
+start0   resq 1                 ; the step this run started at
 msg      resb 128
 
 section .text
@@ -148,6 +149,8 @@ start:
     call print_dec
     say 13, 10
 .fresh:
+    mov rax, [stats+PS_STEP]
+    mov [start0], rax
     lea rcx, [logpath]
     call file_append
     mov [logh], rax
@@ -201,7 +204,8 @@ start:
 .finished:
     lea rcx, [stats]
     call prog_end
-    ; final step, loss and rng for ctrltest to compare against
+    ; final step, loss and rng for ctrltest to compare against, then where this run
+    ; started: a run that ignored the state file would end on the same 48 bytes
     mov rax, [stats+PS_STEP]
     mov [sv], rax
     mov rax, [stats+PS_LOSS]
@@ -210,12 +214,14 @@ start:
     movdqu [sv+16], xmm0
     movdqu xmm0, [rng+16]
     movdqu [sv+32], xmm0
+    mov rax, [start0]
+    mov [sv+48], rax
     lea rcx, [donepath]
     call file_create
     mov rbx, rax
     mov rcx, rax
     lea rdx, [sv]
-    mov r8d, 48
+    mov r8d, 56
     call file_write
     mov rcx, rbx
     call file_close

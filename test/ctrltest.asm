@@ -31,6 +31,7 @@ pi_      resb 24                ; PROCESS_INFORMATION
 cmd      resb 256
 cmd2     resb 256
 expected resb 48
+stopped  resq 1                 ; where the ctrl+c run saved
 code     resd 1
 pid      resq 1
 hproc    resq 1
@@ -176,6 +177,7 @@ start:
 .ctrlc:
     say "one ctrl+c", 13, 10
     call cleanup
+    mov qword [stopped], -1
     lea rcx, [fast]
     mov edx, NEW_CONSOLE
     call spawn
@@ -196,6 +198,7 @@ start:
     test rbx, rbx
     jz .resume
     mov rbx, [rbx]
+    mov [stopped], rbx
     say "  stopped at step "
     mov rcx, rbx
     call print_dec
@@ -229,6 +232,10 @@ start:
     mov ecx, 48
     repe cmpsb
     check e, "ends bit-identical to the clean run (step, loss, rng)"
+    ; a run that started over would end on those bytes too
+    mov rax, [rbx+48]
+    cmp rax, [stopped]
+    check e, "and it carried on from the step it stopped at"
 
 .two:
     say "two ctrl+c", 13, 10
