@@ -994,8 +994,10 @@ align 8
 c_wgtol dq 2e-2
 c_wg8   dq 0.15
 c_wg8lo dq 1e-3                 ; it's ~0.05
+c_wg32  dq 0.02                 ; bf16 rounding gives ~0.004
 m_wg    db "fast gradients vs naive, |g_fast - g_naive| / |g_naive|", 0
 m_wg8   db "fp8 gradients vs bf16, |g_fp8 - g_bf16| / |g_bf16|, between 1e-3 and 0.15", 0
+m_wg32  db "bf16 activations vs f32 (naive both), |g_bf16 - g_f32| / |g_f32|", 0
 
 section .bss
 alignb 8
@@ -1260,6 +1262,45 @@ t_whole:
     check e, "fp8 on two streams, 3 runs: the same gradients, bit for bit"
     mov dword [mdl_streams], 1
     mov dword [mdl_fp8], 0
+
+    ; everything above runs the norms, rope, swiglu and the loss in their bf16
+    ; branches, on both sides. against their f32 ones (es 4, what test\grad checks
+    ; with finite differences): the same weights and batch, set up again in f32
+    mov dword [mdl_fast], 0
+    mov rcx, [wg2]
+    call wrun                   ; naive, bf16 activations
+    mov ecx, 4
+    call model_setup
+    mov ecx, 11
+    call model_init
+    mov rcx, [wg1]
+    call wrun                   ; naive, f32
+    mov rsi, [wg2]
+    mov rdi, [wg1]
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    xor ecx, ecx
+.g32:
+    cvtss2sd xmm0, [rdi+rcx*4]
+    cvtss2sd xmm1, [rsi+rcx*4]
+    subsd xmm1, xmm0
+    mulsd xmm1, xmm1
+    addsd xmm2, xmm1
+    mulsd xmm0, xmm0
+    addsd xmm3, xmm0
+    inc rcx
+    cmp rcx, [mdl+MD_NP]
+    jb .g32
+    divsd xmm2, xmm3
+    sqrtsd xmm0, xmm2
+    movsd [rsp+40], xmm0
+    movsd xmm1, [c_wg32]
+    comisd xmm1, xmm0
+    seta cl
+    movzx ecx, cl
+    lea rdx, [m_wg32]
+    movsd xmm2, [rsp+40]
+    call t_okf
     add rsp, 48
     pop rdi
     pop rsi
