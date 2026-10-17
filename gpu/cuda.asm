@@ -128,7 +128,8 @@ prof_n      resq 1
 evmade      resq 1
 prof_ev     resq MAXP + 1
 prof_fn     resq MAXP
-prof_arg    resq MAXP * 4       ; per launch: args 3, 4, 5, and 7 | grid z << 32
+prof_arg    resq MAXP * 8       ; per launch: args 3, 4, 5, 7 | grid z << 32, 6, 9 | grid z << 32
+                                ; (gemm_tc's m n k flags are 3 4 5 7, gemm_mx's 5 6 7 9)
 prof_ms     resd MAXP
 fn_n        resq 1
 fn_h        resq MAXFN          ; every kernel loaded, and its name
@@ -559,7 +560,7 @@ gpu_launch:
     ret
 .prof:
     ; the event, then what was launched: the kernel, and args 3, 4, 5, 7 plus grid z,
-    ; which for a matmul are M, N, K, flags and the split
+    ; which for gemm_tc are M, N, K, flags and the split, then 6 and 9 for gemm_mx's
     mov rax, [prof_n]
     cmp rax, MAXP
     jae .go
@@ -571,7 +572,7 @@ gpu_launch:
     lea rcx, [prof_fn]
     mov rdx, [rbx+KL_FUNC]
     mov [rcx+rax*8], rdx
-    shl rax, 5
+    shl rax, 6
     lea rcx, [prof_arg]
     add rcx, rax
     mov rdx, [rbx+KL_ARGS+3*8]
@@ -585,6 +586,13 @@ gpu_launch:
     mov r8d, [rbx+KL_ARGS+7*8]
     or rdx, r8
     mov [rcx+24], rdx
+    mov r8, [rbx+KL_ARGS+6*8]
+    mov [rcx+32], r8
+    mov edx, [rbx+KL_GZ]
+    shl rdx, 32
+    mov r8d, [rbx+KL_ARGS+9*8]
+    or rdx, r8
+    mov [rcx+40], rdx
     inc qword [prof_n]
     jmp .go
 

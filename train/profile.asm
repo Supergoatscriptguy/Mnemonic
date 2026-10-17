@@ -34,6 +34,7 @@ e_usage  db "usage: profile <preset> [key=value ...]", 0
 e_preset db "no such preset (looked for train\<name>.cfg)", 0
 s_gemm   db "gemm_tc", 0
 s_mmref  db "mm_ref", 0
+s_gmx    db "gemm_mx", 0
 s_ffwd   db "flash_fwd", 0
 s_fdq    db "flash_dq", 0
 s_fdkv   db "flash_dkv", 0
@@ -447,6 +448,11 @@ tally:
     call streq
     test eax, eax
     jnz .mm
+    mov rcx, r13
+    lea rdx, [s_gmx]
+    call streq
+    test eax, eax
+    jnz .mmx
     ; flash kernels: fwd does 2 of the attention matmuls, dq 3 (s, dp, dq), dkv 4
     movsd xmm1, [c_2]
     mov rcx, r13
@@ -472,7 +478,7 @@ tally:
     jmp .find
 .mm:
     mov rax, rbx
-    shl rax, 5
+    shl rax, 6
     lea rcx, [prof_arg]
     add rcx, rax
     mov rax, [rcx]
@@ -483,6 +489,22 @@ tally:
     mov [kk], rax
     mov rax, [rcx+24]
     mov [kfl], rax
+    jmp .flop
+.mmx:
+    ; gemm_mx has m, n, k in args 5, 6, 7 and the flags in 9
+    mov rax, rbx
+    shl rax, 6
+    lea rcx, [prof_arg]
+    add rcx, rax
+    mov rax, [rcx+16]
+    mov [km], rax
+    mov rax, [rcx+32]
+    mov [kn], rax
+    mov eax, [rcx+24]
+    mov [kk], rax
+    mov rax, [rcx+40]
+    mov [kfl], rax
+.flop:
     cvtsi2sd xmm1, qword [km]
     cvtsi2sd xmm2, qword [kn]
     mulsd xmm1, xmm2
