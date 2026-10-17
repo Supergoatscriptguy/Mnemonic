@@ -245,7 +245,7 @@ con_readline:
     mov qword [rsp+48], 0
     mov qword [rsp+56], 0
     call WideCharToMultiByte
-    mov rbx, rax
+    mov ebx, eax                ; an int: the top half of rax isn't promised
     jmp .trim
 .bytes:
     ; a byte at a time until the newline (it's only for piped input)
