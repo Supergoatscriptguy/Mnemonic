@@ -1023,8 +1023,11 @@ model_setup:
     shl rcx, 2                  ; T * hd/2 * (cos, sin) f32
     call dalloc
     mov [d_rope], rax
+    cmp dword [mdl_fast], 0     ; train fast=0 runs the naive attention too
+    je .naive
     cmp qword [mdl+MD_NAIVE], 0
     je .nonaive
+.naive:
     mov rcx, r12
     imul rcx, [mdl+MD_H]
     imul rcx, [mdl+MD_T]
