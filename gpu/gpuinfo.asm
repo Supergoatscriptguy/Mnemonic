@@ -97,7 +97,10 @@ start:
     mov ecx, CA_MEM_CLOCK
     call gpu_attr
     mov ebx, eax
-    lea eax, [rax+rax]          ; double data rate
+    cmp eax, -1                 ; unknown stays -1 for pghz's "?"
+    je .mclk
+    add eax, eax                ; double data rate
+.mclk:
     call pghz
     say " x "
     mov ecx, CA_BUS_WIDTH
