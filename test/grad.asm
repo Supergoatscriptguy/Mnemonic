@@ -524,7 +524,7 @@ t_adam:
     call gpu_down
     mov rsi, [w0]
     mov rdi, [u]
-    xorpd xmm7, xmm7            ; max |diff|
+    xorpd xmm4, xmm4            ; max |diff|
     xor ecx, ecx
 .p:
     cmp rcx, [mdl+MD_NP]
@@ -552,14 +552,14 @@ t_adam:
     movq rax, xmm3
     btr rax, 63
     movq xmm3, rax
-    ucomisd xmm7, xmm7          ; once it's a nan keep it, maxsd would drop it
+    ucomisd xmm4, xmm4          ; once it's a nan keep it, maxsd would drop it
     jp .pn
-    maxsd xmm7, xmm3
+    maxsd xmm4, xmm3
 .pn:
     inc rcx
     jmp .p
 .pd:
-    movapd xmm0, xmm7
+    movapd xmm0, xmm4
     close_to 0.0, 1e-6, "adamw step with clipping matches the cpu (max abs diff)"
     add rsp, 48
     pop rdi

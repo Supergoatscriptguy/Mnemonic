@@ -257,7 +257,8 @@ transpose:
 t_gemm:
     push rbx
     push rsi
-    sub rsp, 56
+    push rdi
+    sub rsp, 64
     say "matmul layouts, ", "640x384x2048", 13, 10
     mov ecx, GM * GK * 2
     call mem_alloc
@@ -498,7 +499,8 @@ t_gemm:
     lea rdx, [m_split]
     movsd xmm2, [rsp+48]
     call t_okf
-    add rsp, 56
+    add rsp, 64
+    pop rdi
     pop rsi
     pop rbx
     ret

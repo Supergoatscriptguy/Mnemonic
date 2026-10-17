@@ -235,6 +235,8 @@ t_vadd:
 ; ---- copy16: 64 MB of random bytes through the gpu and back
 t_copy:
     push rbx
+    push rsi
+    push rdi
     sub rsp, 32
     mov rbx, [ha]
     xor esi, esi
@@ -270,13 +272,16 @@ t_copy:
     repe cmpsq
     check e, "copy16, 64 MB there and back"
     add rsp, 32
+    pop rdi
+    pop rsi
     pop rbx
     ret
 
 ; ---- f2bf: round to nearest even, same bits as the cpu's version of it
 t_f2bf:
     push rbx
-    sub rsp, 32
+    push rsi
+    sub rsp, 40
     mov rbx, [ha]
     xor esi, esi
 .fill:
@@ -331,7 +336,8 @@ t_f2bf:
     jb .chk
     test r9d, r9d
     check z, "f2bf, 1000003 floats incl. inf/0/ties, same bits as the cpu"
-    add rsp, 32
+    add rsp, 40
+    pop rsi
     pop rbx
     ret
 

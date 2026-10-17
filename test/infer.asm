@@ -559,9 +559,11 @@ cmpd:
 ; ---- exp8 over -20..20 against x87
 t_exp:
     push rbx
-    sub rsp, 48
-    xorpd xmm6, xmm6            ; max rel err
-    movsd [rsp+32], xmm6
+    sub rsp, 80
+    movdqu [rsp+48], xmm6       ; ours to keep (xmm7 holds exp8's result across math_exp)
+    movdqu [rsp+64], xmm7
+    xorpd xmm0, xmm0            ; max rel err
+    movsd [rsp+32], xmm0
     movsd xmm0, [c_start]
     movsd [rsp+40], xmm0
 .l:
@@ -600,7 +602,9 @@ t_exp:
     movzx ecx, cl
     lea rdx, [m_exp]
     call t_okf
-    add rsp, 48
+    movdqu xmm6, [rsp+48]
+    movdqu xmm7, [rsp+64]
+    add rsp, 80
     pop rbx
     ret
 
@@ -751,9 +755,9 @@ t_forward:
 
     ; the cpu, one token at a time, every row of logits against the gpu's
     call eng_reset
-    xorpd xmm6, xmm6
-    movsd [rsp+32], xmm6        ; max diff
-    movsd [rsp+40], xmm6        ; max logit
+    xorpd xmm0, xmm0
+    movsd [rsp+32], xmm0        ; max diff
+    movsd [rsp+40], xmm0        ; max logit
     xor r12d, r12d
 .t:
     cmp r12d, TT
