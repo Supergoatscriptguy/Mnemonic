@@ -993,8 +993,9 @@ section .rdata
 align 8
 c_wgtol dq 2e-2
 c_wg8   dq 0.15
+c_wg8lo dq 1e-3                 ; it's ~0.05
 m_wg    db "fast gradients vs naive, |g_fast - g_naive| / |g_naive|", 0
-m_wg8   db "fp8 gradients vs bf16, |g_fp8 - g_bf16| / |g_bf16|", 0
+m_wg8   db "fp8 gradients vs bf16, |g_fp8 - g_bf16| / |g_bf16|, between 1e-3 and 0.15", 0
 
 section .bss
 alignb 8
@@ -1227,6 +1228,9 @@ t_whole:
     movsd xmm1, [c_wg8]
     comisd xmm1, xmm0
     seta cl
+    comisd xmm0, [c_wg8lo]       ; and not equal: then the fp8 matmuls never ran
+    seta dl
+    and cl, dl
     movzx ecx, cl
     lea rdx, [m_wg8]
     movsd xmm2, [rsp+40]
