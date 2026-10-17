@@ -148,7 +148,7 @@ ckpat     resb 512
 ckpath    resb 512
 cktmp     resb 512
 logpath   resb 512
-msg       resb 8192
+msg       resb 16384            ; plain's copy goes in the top half
 topv      resq MAXK
 topi      resq MAXK
 
@@ -1104,9 +1104,10 @@ report:
     ret
 
 ; rcx = text, rdx = end. a copy without the color codes (ESC [ ... letter) goes to
-; msg+4096, rax = its end
+; msg+8192, rax = its end
 plain:
-    lea rax, [msg+4096]
+    lea rax, [msg+8192]
+    lea r9, [msg+16384]
 .c:
     cmp rcx, rdx
     jae .done
@@ -1126,6 +1127,8 @@ plain:
     ja .esc
     jmp .c
 .keep:
+    cmp rax, r9
+    jae .done
     mov [rax], r8b
     inc rax
     jmp .c
@@ -1142,7 +1145,7 @@ show:
     cmp dword [con_tty], 0
     jne .print
     call plain
-    lea rbx, [msg+4096]
+    lea rbx, [msg+8192]
     mov rsi, rax
 .print:
     mov rcx, rbx
@@ -1175,13 +1178,13 @@ note:
     jmp .log
 .redir:
     lea rcx, [stats]
-    lea rdx, [msg+4096]
+    lea rdx, [msg+8192]
     mov r8, rdi
     sub r8, rdx
     call prog_msg
 .log:
     mov rcx, [logh]
-    lea rdx, [msg+4096]
+    lea rdx, [msg+8192]
     mov r8, rdi
     sub r8, rdx
     call file_write
