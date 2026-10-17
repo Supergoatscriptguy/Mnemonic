@@ -132,6 +132,14 @@ same:
     pop rsi
     ret
 
+; dd_ full of nan bits
+%macro poison 0
+    mov rcx, [dd_]
+    mov edx, 0x7fc00001
+    mov r8d, GM * GN
+    CU cuMemsetD32
+%endmacro
+
 ; max |c - d| / max |d| over n floats of hc, hd -> xmm0
 relerr:
     vxorps xmm2, xmm2, xmm2
@@ -333,19 +341,23 @@ t_gemm:
     movsd xmm2, [rsp+48]
     call t_okf
 
-    ; every other layout has to match the plain one exactly. dc = plain, dd = test
+    ; every other layout has to match the plain one exactly. dc = plain, dd = test,
+    ; refilled with nan bits each time so a kernel that writes nothing can't pass
+    poison
     MMT f_tc, da, dbt, dd_, 0, MM_TB
     mov rcx, [dc]
     mov rdx, [dd_]
     mov r8d, GM * GN * 4
     call same
     check e, "gemm_tc, B stored [K][N] (dx = dy W): same bits as the plain layout"
+    poison
     MMT f_tc, dat, dbt, dd_, 0, MM_TA | MM_TB
     mov rcx, [dc]
     mov rdx, [dd_]
     mov r8d, GM * GN * 4
     call same
     check e, "gemm_tc, both stored [K][..] (dW = dy^T x): same bits"
+    poison
     MMT f_tc, dat, db_, dd_, 0, MM_TA
     mov rcx, [dc]
     mov rdx, [dd_]
@@ -354,6 +366,7 @@ t_gemm:
     check e, "gemm_tc, A stored [K][M]: same bits"
     ; mm_ref reads the transposed layouts in the same k order, so it can't change either
     MMT f_ref, da, db_, dc, 0, 0
+    poison
     MMT f_ref, dat, dbt, dd_, 0, MM_TA | MM_TB
     mov rcx, [dc]
     mov rdx, [dd_]
