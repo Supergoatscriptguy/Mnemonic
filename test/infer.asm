@@ -30,6 +30,8 @@ c_step   dq 0.37
 c_start  dq -20.0
 c_end    dq 20.0
 c_big    dq 8.0
+c_nw     dq 0.3
+c_one    dq 1.0
 tinypath db "scratch\tiny.mnm", 0
 m_same8  db "q8 matvec: every dot product path gives the same bits", 0
 m_same4  db "q4 matvec: every dot product path gives the same bits", 0
@@ -602,6 +604,47 @@ t_exp:
     pop rbx
     ret
 
+; norm weights 1 + 0.3 n instead of all 1, so reading the wrong one shows. on the gpu
+; (the bf16 copies too)
+rand_norms:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rcx, [mdl+MD_NP]
+    shl rcx, 2
+    call mem_alloc
+    mov rbx, rax
+    mov rcx, rax
+    mov rdx, [d_params]
+    mov r8, [mdl+MD_NP]
+    shl r8, 2
+    call gpu_down
+    mov rsi, [mdl+MD_NDEC]      ; the norms are everything after the matrices
+.n:
+    cmp rsi, [mdl+MD_NP]
+    jae .up
+    lea rcx, [rng]
+    call rng_normal
+    mulsd xmm0, [c_nw]
+    addsd xmm0, [c_one]
+    cvtsd2ss xmm0, xmm0
+    movss [rbx+rsi*4], xmm0
+    inc rsi
+    jmp .n
+.up:
+    mov rcx, [d_params]
+    mov rdx, rbx
+    mov r8, [mdl+MD_NP]
+    shl r8, 2
+    call gpu_up
+    mov rcx, rbx
+    call mem_free
+    call model_cast
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
 ; ---- cpu forward against the gpu's, small random model, f32 everywhere
 t_forward:
     push rbx
@@ -610,9 +653,9 @@ t_forward:
     push r12
     sub rsp, 56
     mov qword [mdl+MD_L], 2
-    mov qword [mdl+MD_D], 128
-    mov qword [mdl+MD_H], 2
-    mov qword [mdl+MD_KVH], 1
+    mov qword [mdl+MD_D], 256       ; two kv heads, so a wrong head mapping shows
+    mov qword [mdl+MD_H], 4
+    mov qword [mdl+MD_KVH], 2
     mov qword [mdl+MD_F], 384
     mov qword [mdl+MD_V], 512
     mov qword [mdl+MD_T], TT
@@ -625,6 +668,7 @@ t_forward:
     call model_setup
     mov ecx, 23
     call model_init
+    call rand_norms
 
     ; the model file: the header, then the params exactly as they are (every
     ; matrix here is a multiple of 64 bytes, so there's no padding between them)
