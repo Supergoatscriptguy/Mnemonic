@@ -745,15 +745,21 @@ trainloop:
     jne .nlast
     or r13d, 3
 .nlast:
+    mov rcx, [valev]            ; 0 = never (the last step still validates)
+    test rcx, rcx
+    jz .nval
     xor edx, edx
-    div qword [valev]
+    div rcx
     test rdx, rdx
     jnz .nval
     or r13d, 1
 .nval:
     mov rax, [step]
+    mov rcx, [saveev]           ; 0 = only the timed saves
+    test rcx, rcx
+    jz .nsave
     xor edx, edx
-    div qword [saveev]
+    div rcx
     test rdx, rdx
     jnz .nsave
     or r13d, 2
@@ -1082,8 +1088,11 @@ report:
     xor edx, edx
     call prog_draw
     lea rax, [r12+1]
+    mov rcx, [logev]            ; 0 = no lines in the log
+    test rcx, rcx
+    jz .done
     xor edx, edx
-    div qword [logev]
+    div rcx
     test rdx, rdx
     jnz .done
     mov rcx, [stats+PS_T0]      ; the bar only keeps this fresh when it draws
