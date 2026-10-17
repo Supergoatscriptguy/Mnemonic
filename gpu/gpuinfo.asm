@@ -256,13 +256,13 @@ kernel:
     mov edx, 11
     call rjust
     say "    "
-    ; resident threads / the SM's maximum
-    mov eax, [rsp+40]
-    imul eax, r12d
-    cvtsi2sd xmm0, rax
+    ; resident threads / the SM's maximum (the driver call first: it can use xmm0)
     mov ecx, CA_MAX_THREADS_SM
     call gpu_attr
     cvtsi2sd xmm1, rax
+    mov eax, [rsp+40]
+    imul eax, r12d
+    cvtsi2sd xmm0, rax
     divsd xmm0, xmm1
     mov rax, 0x4059000000000000     ; 100
     movq xmm1, rax
