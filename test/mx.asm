@@ -279,8 +279,8 @@ cmpf:
     vsubss xmm0, xmm0, xmm1
     vandps xmm0, xmm0, xmm5
     vandps xmm1, xmm1, xmm5
-    vmaxss xmm2, xmm2, xmm0
-    vmaxss xmm3, xmm3, xmm1
+    vpmaxud xmm2, xmm2, xmm0    ; as integers: a nan's bits are above inf's, so it sticks
+    vpmaxud xmm3, xmm3, xmm1
     inc eax
     cmp eax, r8d
     jb .c
@@ -1089,8 +1089,9 @@ t_gemm:
     mov r8d, ebx
     call cmpf
     vmovsd xmm2, xmm0, xmm0
-    vcomisd xmm0, [c_tol]
-    setb cl
+    vmovsd xmm1, [c_tol]
+    vcomisd xmm1, xmm0          ; tol > err, so a nan fails
+    seta cl
     movzx ecx, cl
     mov rdx, rdi
     call t_okf
@@ -1135,8 +1136,9 @@ t_vsf32:
     mov r8d, 1024 * 1024
     call cmpf
     vmovsd xmm2, xmm0, xmm0
-    vcomisd xmm0, [c_tolq]
-    setb cl
+    vmovsd xmm1, [c_tolq]
+    vcomisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_q]
     call t_okf
@@ -1198,8 +1200,9 @@ t_split:
     mov r8d, 256 * 256
     call cmpf
     vmovsd xmm2, xmm0, xmm0
-    vcomisd xmm0, [c_tol]
-    setb cl
+    vmovsd xmm1, [c_tol]
+    vcomisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_spl]
     call t_okf
@@ -1257,8 +1260,9 @@ t_bf16r:
     mov r8d, 256 * 384
     call cmpf
     vmovsd xmm2, xmm0, xmm0
-    vcomisd xmm0, [c_tol16]
-    setb cl
+    vmovsd xmm1, [c_tol16]
+    vcomisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_b16]
     call t_okf

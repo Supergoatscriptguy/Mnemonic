@@ -593,8 +593,8 @@ t_gemm:
     vsubss xmm0, xmm0, xmm1
     vandps xmm0, xmm0, xmm5
     vandps xmm1, xmm1, xmm5
-    vmaxss xmm2, xmm2, xmm0
-    vmaxss xmm3, xmm3, xmm1
+    vpmaxud xmm2, xmm2, xmm0    ; as integers: a nan's bits are above inf's, so it sticks
+    vpmaxud xmm3, xmm3, xmm1
     inc ecx
     cmp ecx, ebx
     jb .c
@@ -604,8 +604,9 @@ t_gemm:
     vmovsd [maxr], xmm3
     vdivsd xmm0, xmm2, xmm3
     vmovsd [rsp+40], xmm0
-    vcomisd xmm0, [c_tol]
-    setb cl
+    vmovsd xmm1, [c_tol]
+    vcomisd xmm1, xmm0          ; this way round a nan fails
+    seta cl
     movzx ecx, cl
     mov rdx, [rsp+32]
     movsd xmm2, [rsp+40]

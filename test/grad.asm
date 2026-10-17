@@ -355,7 +355,10 @@ fdcheck:
     call fd
     subsd xmm0, [rsp+48]
     call absdiv
+    ucomisd xmm0, xmm0          ; maxsd would drop a nan here
+    jp .worst
     maxsd xmm0, [rsp+40]
+.worst:
     movsd [rsp+40], xmm0
 
     ; "layer 1 wqkv: ..."
@@ -377,8 +380,9 @@ fdcheck:
     call fmt_str
     mov byte [rax], 0
     movsd xmm0, [rsp+40]
-    comisd xmm0, [c_tol]
-    setb cl
+    movsd xmm1, [c_tol]
+    comisd xmm1, xmm0           ; tol > err, so a nan fails
+    seta cl
     movzx ecx, cl
     lea rdx, [tname]
     movsd xmm2, [rsp+40]
@@ -548,7 +552,10 @@ t_adam:
     movq rax, xmm3
     btr rax, 63
     movq xmm3, rax
+    ucomisd xmm7, xmm7          ; once it's a nan keep it, maxsd would drop it
+    jp .pn
     maxsd xmm7, xmm3
+.pn:
     inc rcx
     jmp .p
 .pd:

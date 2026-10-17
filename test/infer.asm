@@ -314,8 +314,9 @@ t_matvec:
     movapd xmm2, xmm0
     divsd xmm2, [sse4]
     xor ecx, ecx
-    comisd xmm0, [sse4]
-    setb cl
+    movsd xmm1, [sse4]
+    comisd xmm1, xmm0           ; plain > fitted, so a nan fails
+    seta cl
     lea rdx, [m_sse4f]
     call t_okf
     add rsp, 40
@@ -530,15 +531,22 @@ cmpd:
     subsd xmm0, xmm1
     andpd xmm0, xmm5
     andpd xmm1, xmm5
+    ucomisd xmm3, xmm3          ; a nan stays once it's in (maxsd takes it, then drops it)
+    jp .m1
     maxsd xmm3, xmm0
+.m1:
+    ucomisd xmm4, xmm4
+    jp .m2
     maxsd xmm4, xmm1
+.m2:
     inc eax
     cmp eax, R
     jb .l
     divsd xmm3, xmm4
     movsd [rsp+32], xmm3
-    comisd xmm3, [r8]
-    setb cl
+    movsd xmm1, [r8]
+    comisd xmm1, xmm3           ; tol > err, so a nan fails
+    seta cl
     movzx ecx, cl
     movsd xmm2, [rsp+32]
     call t_okf
@@ -573,7 +581,10 @@ t_exp:
     mov rax, 0x7fffffffffffffff
     movq xmm1, rax
     andpd xmm7, xmm1
+    ucomisd xmm7, xmm7          ; maxsd would drop a nan here
+    jp .keep
     maxsd xmm7, [rsp+32]
+.keep:
     movsd [rsp+32], xmm7
     movsd xmm0, [rsp+40]
     addsd xmm0, [c_step]
@@ -581,8 +592,9 @@ t_exp:
     jmp .l
 .done:
     movsd xmm2, [rsp+32]
-    comisd xmm2, [c_etol]
-    setb cl
+    movsd xmm1, [c_etol]
+    comisd xmm1, xmm2
+    seta cl
     movzx ecx, cl
     lea rdx, [m_exp]
     call t_okf
@@ -719,9 +731,15 @@ t_forward:
     movq xmm2, rax
     andpd xmm0, xmm2
     andpd xmm1, xmm2
+    ucomisd xmm0, xmm0          ; maxsd would drop a nan
+    jp .f1
     maxsd xmm0, [rsp+32]
+.f1:
     movsd [rsp+32], xmm0
+    ucomisd xmm1, xmm1
+    jp .f2
     maxsd xmm1, [rsp+40]
+.f2:
     movsd [rsp+40], xmm1
     inc ecx
     cmp ecx, 512
@@ -732,8 +750,9 @@ t_forward:
     movsd xmm2, [rsp+32]
     divsd xmm2, [rsp+40]
     movsd [rsp+32], xmm2
-    comisd xmm2, [c_ftol]
-    setb cl
+    movsd xmm1, [c_ftol]
+    comisd xmm1, xmm2
+    seta cl
     movzx ecx, cl
     lea rdx, [m_fwd]
     movsd xmm2, [rsp+32]

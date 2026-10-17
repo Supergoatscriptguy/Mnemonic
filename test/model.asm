@@ -147,8 +147,8 @@ relerr:
     vsubss xmm0, xmm0, xmm1
     vandps xmm0, xmm0, xmm5
     vandps xmm1, xmm1, xmm5
-    vmaxss xmm2, xmm2, xmm0
-    vmaxss xmm3, xmm3, xmm1
+    vpmaxud xmm2, xmm2, xmm0    ; as integers: a nan's bits are above inf's, so it sticks
+    vpmaxud xmm3, xmm3, xmm1
     inc rax
     cmp rax, rcx
     jb .c
@@ -325,8 +325,9 @@ t_gemm:
     mov ecx, GM * GN
     call relerr
     movsd [rsp+48], xmm0
-    comisd xmm0, [c_tol]
-    setb cl
+    movsd xmm1, [c_tol]
+    comisd xmm1, xmm0           ; tol > err, so a nan fails
+    seta cl
     movzx ecx, cl
     lea rdx, [m_nt]
     movsd xmm2, [rsp+48]
@@ -374,8 +375,9 @@ t_gemm:
     mov ecx, GM * GN
     call relerr
     movsd [rsp+48], xmm0
-    comisd xmm0, [c_tol]
-    setb cl
+    movsd xmm1, [c_tol]
+    comisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_r]
     movsd xmm2, [rsp+48]
@@ -476,8 +478,9 @@ t_gemm:
     mov ecx, GM * GN
     call relerr
     movsd [rsp+48], xmm0
-    comisd xmm0, [c_tol]
-    setb cl
+    movsd xmm1, [c_tol]
+    comisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_split]
     movsd xmm2, [rsp+48]
@@ -626,8 +629,8 @@ bferr:
     vsubss xmm0, xmm0, xmm1
     vandps xmm0, xmm0, xmm5
     vandps xmm1, xmm1, xmm5
-    vmaxss xmm2, xmm2, xmm0
-    vmaxss xmm3, xmm3, xmm1
+    vpmaxud xmm2, xmm2, xmm0
+    vpmaxud xmm3, xmm3, xmm1
     inc ecx
     cmp ecx, ebx
     jb .c
@@ -684,8 +687,8 @@ secerr:
     vsubss xmm0, xmm0, xmm1
     vandps xmm0, xmm0, xmm5
     vandps xmm1, xmm1, xmm5
-    vmaxss xmm2, xmm2, xmm0
-    vmaxss xmm3, xmm3, xmm1
+    vpmaxud xmm2, xmm2, xmm0
+    vpmaxud xmm3, xmm3, xmm1
     inc ecx
     cmp ecx, r13d
     jb .c
@@ -706,8 +709,9 @@ secerr:
 ; xmm0 = the error, rdx = name, %1 = the bar
 %macro aok 1
     movsd [rsp+32], xmm0
-    comisd xmm0, [%1]
-    setb cl
+    movsd xmm1, [%1]
+    comisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     movsd xmm2, [rsp+32]
     call t_okf
@@ -1136,8 +1140,9 @@ t_whole:
     divsd xmm2, xmm3
     sqrtsd xmm0, xmm2
     movsd [rsp+40], xmm0
-    comisd xmm0, [c_wgtol]
-    setb cl
+    movsd xmm1, [c_wgtol]
+    comisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_wg]
     movsd xmm2, [rsp+40]
@@ -1206,8 +1211,9 @@ t_whole:
     divsd xmm2, xmm3
     sqrtsd xmm0, xmm2
     movsd [rsp+40], xmm0
-    comisd xmm0, [c_wg8]
-    setb cl
+    movsd xmm1, [c_wg8]
+    comisd xmm1, xmm0
+    seta cl
     movzx ecx, cl
     lea rdx, [m_wg8]
     movsd xmm2, [rsp+40]
