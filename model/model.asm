@@ -378,12 +378,13 @@ mx_mm:
     mov [rsp+32], rax
     call qcols
 .b:
+    ; a weight gradient's B is an activation, every other B is a weight. not from
+    ; the address: under fp8 d_bf only holds E, the layers' offsets point past it
+    test r15d, MM_TA
+    jnz .bact
     mov rax, rdi
     sub rax, [d_bf]
-    jb .bact
     shr rax, 1                  ; its param offset
-    cmp rax, [mdl+MD_NP]
-    jae .bact
     mov rcx, rax
     shr rcx, 5
     test r15d, MM_TB
