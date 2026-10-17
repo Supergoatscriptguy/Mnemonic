@@ -1377,12 +1377,10 @@ sample:
     call tok_decode
     lea rcx, [rdi+rax]
 .clean:
-    cmp rdi, rcx
+    cmp rdi, rcx                ; (only the reply: an esc in it would be a vt sequence)
     jae .end
     cmp byte [rdi], 32
     jae .ok
-    cmp byte [rdi], 27
-    je .ok
     mov byte [rdi], ' '
 .ok:
     inc rdi
