@@ -139,6 +139,7 @@ nus       resq 2 * MAXACC       ; distinct tokens per micro-batch
 tgt       resq 2                ; targets per step (the loss divides by this)
 dval      resq 1
 dsamp     resq 1
+sampt     resq 1                ; a sample's row: SAMPT, or the context if that's shorter
 hlog      resq 1
 seq       resw SAMPT + 8
 ; names
@@ -1261,6 +1262,13 @@ sample:
     push r12
     push r13
     sub rsp, 32
+    ; past the context the rope table runs out (tiny is 128)
+    mov rax, [mdl+MD_T]
+    cmp rax, SAMPT
+    jbe .t
+    mov eax, SAMPT
+.t:
+    mov [sampt], rax
     lea rdi, [seq]
     xor eax, eax
     mov ecx, SAMPT + 8
@@ -1304,7 +1312,7 @@ sample:
 .gen:
     cmp rbx, [slen]
     jae .show
-    cmp r12, SAMPT
+    cmp r12, [sampt]
     jae .show
     mov rcx, [dsamp]
     lea rdx, [seq]
@@ -1313,7 +1321,8 @@ sample:
     mov rax, [dsamp]
     mov [mb+MB_TOK], rax
     mov qword [mb+MB_B], 1
-    mov qword [mb+MB_T], SAMPT
+    mov rax, [sampt]
+    mov [mb+MB_T], rax
     lea rcx, [mb]
     mov edx, FW_LOGITS
     call model_fwd
