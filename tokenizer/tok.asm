@@ -55,6 +55,9 @@ tok_load:
     cmp dword [rbx+TKH_SPECIAL0], SPECIAL0
     jne .bad
     mov eax, [rbx+TKH_NMERGES]
+    lea rcx, [rax*4+TKH_SIZE]   ; a short file (a write that died half way) would build
+    cmp rcx, rdx                ; its ranks from whatever's past the end
+    ja .bad
     mov [tok_nmerges], rax
     mov rax, [rbx+TKH_HASH]
     mov [tok_hash], rax
