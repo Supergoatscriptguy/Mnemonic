@@ -1,7 +1,8 @@
 ; stage 5 test: stop a training run half way, carry on from its checkpoint, and end
 ; up with exactly the same weights and adam state as a run that never stopped.
 ; runs bin\train.exe (the tiny preset) three times, on three little .tok files cut
-; from the real ones, so the runs cross files (and the stop lands in the second one).
+; from the real ones, so the runs cross files. the stop is past the val (and the sample) at 20,
+; so the rng and val loss in the checkpoint have been used by then.
 ; then all of it again with fp8=1 adam16=1: the fp8 weight copies get rebuilt on
 ; load, and the bf16 moments go through the f32 ones in the checkpoint
 default rel
@@ -15,7 +16,7 @@ extern CreateProcessA, WaitForSingleObject, GetExitCodeProcess, TerminateProcess
 
 section .rdata
 run_a    db "bin\train.exe tiny run=restest_a data=scratch\restest\*.tok", 0
-run_b1   db "bin\train.exe tiny run=restest_b data=scratch\restest\*.tok stop_at=17", 0
+run_b1   db "bin\train.exe tiny run=restest_b data=scratch\restest\*.tok stop_at=23", 0
 run_b2   db "bin\train.exe tiny run=restest_b data=scratch\restest\*.tok", 0
 s_scr    db "scratch", 0
 s_dir    db "scratch\restest", 0
@@ -26,18 +27,18 @@ pat_a    db "checkpoints\restest_a\*.ckpt", 0
 pat_b    db "checkpoints\restest_b\*.ckpt", 0
 log_a    db "logs\restest_a.log", 0
 log_b    db "logs\restest_b.log", 0
-mid_b    db "checkpoints\restest_b\step_00000017.ckpt", 0
+mid_b    db "checkpoints\restest_b\step_00000023.ckpt", 0
 end_a    db "checkpoints\restest_a\step_00000040.ckpt", 0
 end_b    db "checkpoints\restest_b\step_00000040.ckpt", 0
 e_spawn  db "CreateProcess failed", 0
 run_c    db "bin\train.exe tiny run=restest_c data=scratch\restest\*.tok fp8=1 adam16=1", 0
-run_d1   db "bin\train.exe tiny run=restest_d data=scratch\restest\*.tok stop_at=17 fp8=1 adam16=1", 0
+run_d1   db "bin\train.exe tiny run=restest_d data=scratch\restest\*.tok stop_at=23 fp8=1 adam16=1", 0
 run_d2   db "bin\train.exe tiny run=restest_d data=scratch\restest\*.tok fp8=1 adam16=1", 0
 pat_c    db "checkpoints\restest_c\*.ckpt", 0
 pat_d    db "checkpoints\restest_d\*.ckpt", 0
 log_c    db "logs\restest_c.log", 0
 log_d    db "logs\restest_d.log", 0
-mid_d    db "checkpoints\restest_d\step_00000017.ckpt", 0
+mid_d    db "checkpoints\restest_d\step_00000023.ckpt", 0
 end_c    db "checkpoints\restest_c\step_00000040.ckpt", 0
 end_d    db "checkpoints\restest_d\step_00000040.ckpt", 0
 align 8
@@ -75,7 +76,7 @@ start:
 
 section .rdata
 m_same db "both end on the same weights, adam state, step, data position and rng, bit for bit", 0
-s_at17 db "start step=17", 13, 10, 0
+s_from db "start step=23", 13, 10, 0
 section .text
 
 ; rcx = a set (see set_bf)
@@ -102,7 +103,7 @@ round:
     mov rcx, [rbx+8]
     call run
     cmp eax, 2
-    check e, "stopped run, saves at step 17 and exits with 2"
+    check e, "stopped run, saves at step 23 and exits with 2"
     mov rcx, [rbx+56]
     call file_exists
     test eax, eax
@@ -110,15 +111,15 @@ round:
     mov rcx, [rbx+16]
     call run
     test eax, eax
-    check z, "resumed run, from 17 to 40"
+    check z, "resumed run, from 23 to 40"
     ; a run that started over would end on the same bytes too
     mov rcx, [rbx+48]
     call file_read_all
     mov rcx, rax
-    lea r8, [s_at17]
+    lea r8, [s_from]
     call has
     test eax, eax
-    check nz, "and it really started at 17 (its log says so)"
+    check nz, "and it really started at 23 (its log says so)"
 
     ; same bytes, apart from the wall clock time in the header
     mov rcx, [rbx+64]
