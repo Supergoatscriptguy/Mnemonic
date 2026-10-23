@@ -1,12 +1,13 @@
-; mathgen [n=1000] [seed=1] [split=train|eval|all] [out=datasets\math\arith.txt]: math problems worked out
+; mathgen [n=1000] [seed=1] [split=train|eval|all] [skip=file] [out=datasets\math\arith.txt]: math problems worked out
 ; step by step, as conversations in chatdocs' text format: long multiplication and
 ; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
 ; long division here, the rest of arithmetic in arith.asm and more algebra in
 ; algebra.asm. every step gets a line of its own, so the numbers in it stay small
 ; (under 100 is one token) and the steps always look the same. the last line of an
 ; answer is the answer, and a "# topic" line before each problem says what it is.
-; split: a hash of the worked answer puts 1 in 16 problems in eval, and train never
-; gets those, whatever the seed (the question's wording doesn't count)
+; split: a key for the problem itself (pkey) puts 1 in 16 in eval, and train never gets
+; those, whatever the seed, the wording or how the working is written out. skip= leaves
+; out every problem that's in another mathgen file, by the same key
 ; uses: math\arith math\algebra math\decimal math\geometry math\algebra2
 default rel
 bits 64
@@ -16,12 +17,15 @@ bits 64
 extern ExitProcess
 
 BUFSZ equ 64 << 20
+SEENSZ equ 1 << 16              ; the skip set (a power of 2, well over 2x what's in it)
 
 section .rdata
 k_n      db "n", 0
 k_seed   db "seed", 0
 k_out    db "out", 0
 k_split  db "split", 0
+k_skip   db "skip", 0
+e_skip   db "can't read the skip file", 0
 d_split  db "train", 0
 s_eval   db "eval", 0
 s_all    db "all", 0
@@ -155,6 +159,8 @@ fh       resq 1
 outp     resq 1
 nprob    resq 1
 split    resq 1                 ; 0 train, 1 eval, 2 all
+seen     resq 1                 ; skip='s problems by pkey, or 0
+nskip    resq 1
 na       resq 1
 nb       resq 1
 nq       resq 1
@@ -211,6 +217,14 @@ start:
     call streq
     add rax, rax
     add [split], rax
+    lea rcx, [k_skip]
+    lea rdx, [empty]
+    call cfg_str
+    cmp byte [rax], 0
+    je .noskip
+    mov rcx, rax
+    call loadskip
+.noskip:
     lea rcx, [s_dir]
     call make_dir
     mov rcx, [outp]
@@ -277,6 +291,13 @@ start:
     say " problems -> "
     mov rcx, [outp]
     call print_z
+    cmp qword [nskip], 0
+    je .ns
+    say " (none of the "
+    mov rcx, [nskip]
+    call print_dec
+    say " in the skip file)"
+.ns:
     say 13, 10
     xor ecx, ecx
     call ExitProcess
@@ -298,43 +319,216 @@ streq:
     xor eax, eax
     ret
 
-; rcx = where the problem just written starts. eax = 1 if it belongs to this split:
-; fnv-1a of the answer, from "assistant: " on, and 1 bucket in 16 is eval's
+; rcx = where the problem just written starts. eax = 1 if it belongs to this split
+; (1 bucket of pkey in 16 is eval's) and isn't one of skip='s
 keep:
+    sub rsp, 40
+    mov rdx, rdi
+    call pkey
     cmp qword [split], 2
-    je .yes
-.find:
-    cmp rcx, rdi
-    jae .yes                    ; (always has one)
-    cmp byte [rcx], 10
-    jne .f
-    cmp byte [rcx+1], 'a'
-    je .hash
-.f:
-    inc rcx
-    jmp .find
-.hash:
-    mov rax, 0xcbf29ce484222325
-    mov r8, 0x100000001b3
-.h:
-    cmp rcx, rdi
-    jae .bucket
-    movzx edx, byte [rcx]
-    xor rax, rdx
-    imul rax, r8
-    inc rcx
-    jmp .h
-.bucket:
-    shr rax, 60                 ; the top 4 bits
+    je .skip
+    mov rcx, rax
+    shr rcx, 60                 ; the top 4 bits
     xor edx, edx
-    test rax, rax
+    test rcx, rcx
     sete dl                     ; 1 = eval's
-    xor eax, eax
     cmp rdx, [split]
-    sete al
-    ret
+    jne .no
+.skip:
+    cmp qword [seen], 0
+    je .yes
+    mov rcx, rax
+    call seen_has
+    test eax, eax
+    jnz .no
 .yes:
     mov eax, 1
+    add rsp, 40
+    ret
+.no:
+    xor eax, eax
+    add rsp, 40
+    ret
+
+; rcx = a problem's "# topic" line, rdx = just past its last line's newline. rax = a
+; key for the problem itself, whatever the wording or the working: fnv-1a of the last
+; line (it restates the problem, or is the answer), mixed with the sum and the sum of
+; squares of the numbers in the question (order doesn't matter, "subtract 5 from 12"
+; and "12 - 5" have the same)
+pkey:
+    mov r10, rdx
+.t:
+    cmp rcx, r10                ; past the topic line
+    jae .q
+    cmp byte [rcx], 10
+    je .tq
+    inc rcx
+    jmp .t
+.tq:
+    inc rcx
+.q:
+    xor r8d, r8d                ; sum
+    xor r9d, r9d                ; sum of squares
+    xor r11d, r11d              ; the number being read
+.n:
+    cmp rcx, r10
+    jae .last
+    movzx eax, byte [rcx]
+    inc rcx
+    sub eax, '0'
+    cmp eax, 9
+    ja .nd
+    imul r11, r11, 10
+    add r11, rax
+    jmp .n
+.nd:
+    add r8, r11
+    mov rax, r11
+    imul rax, r11
+    add r9, rax
+    xor r11d, r11d
+    cmp byte [rcx-1], 10
+    jne .n
+.last:
+    lea rcx, [r10-2]            ; back to the start of the last line
+.b:
+    cmp byte [rcx], 10
+    je .bf
+    dec rcx
+    jmp .b
+.bf:
+    inc rcx
+    mov rax, 0xcbf29ce484222325
+    mov rdx, 0x100000001b3
+.h:
+    cmp rcx, r10
+    jae .mix
+    movzx r11d, byte [rcx]
+    xor rax, r11
+    imul rax, rdx
+    inc rcx
+    jmp .h
+.mix:
+    mov r11, 0x9e3779b97f4a7c15
+    imul r8, r11
+    xor rax, r8
+    imul rax, rdx
+    mov r11, 0xc2b2ae3d27d4eb4f
+    imul r9, r11
+    xor rax, r9
+    imul rax, rdx
+    mov rcx, rax                ; fold so the top bits see everything
+    shr rcx, 29
+    xor rax, rcx
+    imul rax, rdx
+    ret
+
+; rcx = a mathgen file: every problem in it goes in the skip set
+loadskip:
+    push rbx
+    push rsi
+    push r12
+    sub rsp, 32
+    call file_read_all
+    test rax, rax
+    jnz .ok
+    lea rcx, [e_skip]
+    call fatal
+.ok:
+    mov rbx, rax
+    mov ecx, SEENSZ * 8
+    call mem_alloc
+    mov [seen], rax
+    mov rsi, rbx                ; a problem's start
+.p:
+    cmp byte [rsi], 0
+    je .done
+    mov r12, rsi                ; its end: just past the newline before a blank line
+    xor eax, eax                ; has a "user: " line
+.e:
+    cmp byte [r12], 0
+    je .end
+    cmp byte [r12], 10
+    jne .en
+    cmp dword [r12+1], 'user'
+    jne .u
+    mov eax, 1
+.u:
+    cmp byte [r12+1], 10
+    je .end1
+    cmp byte [r12+1], 0
+    je .end1
+.en:
+    inc r12
+    jmp .e
+.end1:
+    inc r12
+.end:
+    test eax, eax
+    jz .next                    ; the header
+    mov rcx, rsi
+    mov rdx, r12
+    call pkey
+    mov rcx, rax
+    call seen_add
+    inc qword [nskip]
+.next:
+    mov rsi, r12
+.s:
+    cmp byte [rsi], 10          ; past the blank line(s)
+    jne .p
+    inc rsi
+    jmp .s
+.done:
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a key: into the skip set, open addressing
+seen_add:
+    test rcx, rcx
+    jnz .k
+    inc rcx
+.k:
+    mov rax, [seen]
+    mov rdx, rcx
+.l:
+    and edx, SEENSZ - 1
+    cmp [rax+rdx*8], rcx
+    je .r
+    cmp qword [rax+rdx*8], 0
+    je .put
+    inc edx
+    jmp .l
+.put:
+    mov [rax+rdx*8], rcx
+.r:
+    ret
+
+; rcx = a key. eax = 1 if it's in the skip set
+seen_has:
+    test rcx, rcx
+    jnz .k
+    inc rcx
+.k:
+    mov r8, [seen]
+    mov rdx, rcx
+.l:
+    and edx, SEENSZ - 1
+    mov rax, [r8+rdx*8]
+    test rax, rax
+    jz .no
+    cmp rax, rcx
+    je .yes
+    inc edx
+    jmp .l
+.yes:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
     ret
 
 ; [buf, rdi) to the file, rdi back to the start
