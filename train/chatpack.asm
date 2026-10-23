@@ -20,7 +20,7 @@ bits 64
 extern ExitProcess
 
 MAXIN  equ 64
-MAXCV  equ 4 << 20              ; conversations, repeats included
+MAXCV  equ 16 << 20             ; conversations, repeats included (mathgen's sets are millions)
 WINDOW equ 1024                  ; how far ahead to look for one that fits
 CHUNK  equ 32 << 20             ; output buffer
 
