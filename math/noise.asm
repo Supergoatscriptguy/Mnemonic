@@ -240,6 +240,7 @@ noisify:
     push r15
     sub rsp, 56
     mov [rsp+32], rdi           ; the end
+    mov qword [rsp+48], 0       ; bracket depth
     mov rsi, rcx
 .t:
     cmp byte [rsi], 10          ; past "# topic"
@@ -306,9 +307,20 @@ noisify:
     cmp rsi, r13
     jae .end
     movzx eax, byte [rsi]
-    ; " op " squeezed to "op"
+    ; " op " squeezed to "op", and (1, 2) to (1,2)
     test r15d, N_SQ
     jz .nsq
+    cmp al, ','
+    jne .sp
+    cmp qword [rsp+48], 0
+    je .nsq
+    cmp byte [rsi+1], ' '
+    jne .nsq
+    mov byte [rdi], ','
+    inc rdi
+    add rsi, 2
+    jmp .body
+.sp:
     cmp al, ' '
     jne .nsq
     inc rsi
@@ -433,6 +445,14 @@ noisify:
     jmp .cg
 .copy:
     mov al, [rsi]
+    cmp al, '('                 ; how deep in brackets, for the commas
+    jne .c1
+    inc qword [rsp+48]
+.c1:
+    cmp al, ')'
+    jne .c2
+    dec qword [rsp+48]
+.c2:
     mov [rdi], al
     inc rdi
     inc rsi

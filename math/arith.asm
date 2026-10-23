@@ -72,6 +72,15 @@ qlcm dq ql0, oand, sq,  ql1, oand, sdot,  ql2, oand, sq,  ql3, ocomma, sbr
      dq ql4, oand, sgo,  ql5, oand, empty,  ql6, oand, sq
 NQLCM equ 7
 
+fs0 db "Simplify ", 0
+fs1 db "Write ", 0
+fs2 db "Reduce ", 0
+fs3 db "What is ", 0
+fe1 db " in lowest terms.", 0
+fe3 db " in simplest form?", 0
+align 8
+fsq dq fs0, fs1, fs2, fs3
+fss dq sdot, fe1, sdot, fe3
 qe0 db "Evaluate ", 0
 align 8
 qpow dq qa0, sq,  qa2, sdot,  empty, seq,  qw0, sdot,  qe0, sdot
@@ -202,6 +211,20 @@ t18a db "Answer: ", WR, " meters", 0
 t19q db WN, " has ", WA, " ", WI, " and a friend has ", WB, ". How many more does ", WN, " have?", 0
 t19e db "The difference is ", WA, " - ", WB, ".", 0
 t19a db "Answer: ", WR, " more", 0
+t20q db "A pizza costs ", WB, " dollars. How much do ", WA, " pizzas cost?", 0
+t20e db WA, " pizzas at ", WB, " dollars each: ", WA, " × ", WB, ".", 0
+t21q db "One notebook costs ", WB, " dollars. What do ", WA, " notebooks cost?", 0
+t21e db WA, " notebooks at ", WB, " dollars each: ", WA, " × ", WB, ".", 0
+t22q db "I have ", WA, " ", WI, " and ", WB, " friends. If I share them equally, how many does each friend get?", 0
+t22e db "Sharing equally means dividing: ", WA, " ÷ ", WB, ".", 0
+t23q db WN, " is ", WA, ", and ", WN, "'s dad is ", WB, " times as old. How old is the dad?", 0
+t23e db WB, " times as old means multiplying: ", WA, " × ", WB, ".", 0
+t24q db WN, " had ", WA, " ", WI, " and lost ", WB, " of them. How many are left?", 0
+t24e db "Losing ", WB, " means subtracting: ", WA, " - ", WB, ".", 0
+t25q db WN, " has ", WA, " ", WI, " and gets ", WB, " more. How many ", WI, " does ", WN, " have now?", 0
+t25e db "Getting ", WB, " more means adding: ", WA, " + ", WB, ".", 0
+t26q db "Pens cost ", WB, " dollars each. How much are ", WA, " pens?", 0
+t26e db WA, " pens at ", WB, " dollars each: ", WA, " × ", WB, ".", 0
 align 8
 ; question, working, answer, what it takes (wkind), then A, B, C's ranges. kind 3's A
 ; is how many each gets, and the fix-ups in word_one keep the rest sensible
@@ -225,7 +248,14 @@ wtab dq t0q, t0e, t0a, 0,  2, 500,  2, 500,  0, 0
      dq t17q, t17e, t17a, 2,  5, 15,  3, 8,  0, 0
      dq t18q, t18e, t18a, 0,  100, 2000,  100, 2000,  0, 0
      dq t19q, t19e, t19a, 1,  10, 999,  1, 999,  0, 0
-NWORD equ 20
+     dq t20q, t20e, t5a, 2,  2, 20,  2, 30,  0, 0
+     dq t21q, t21e, t5a, 2,  2, 30,  2, 25,  0, 0
+     dq t22q, t22e, t0a, 3,  2, 20,  2, 12,  0, 0
+     dq t23q, t23e, t17a, 2,  5, 15,  2, 6,  0, 0
+     dq t24q, t24e, t0a, 1,  10, 500,  1, 500,  0, 0
+     dq t25q, t25e, t0a, 0,  2, 500,  2, 500,  0, 0
+     dq t26q, t26e, t5a, 2,  2, 40,  2, 20,  0, 0
+NWORD equ 27
 wkind dq word_one.add, word_one.sub, word_one.mul, word_one.div, word_one.div
       dq word_one.mulsub, word_one.subsub, word_one.perim, word_one.add3
       dq word_one.ceil, word_one.temp
@@ -1465,9 +1495,11 @@ frac_one:
     push r15
     sub rsp, 88
     xor ecx, ecx
-    mov edx, 3
+    mov edx, 4
     call rnd
     mov r14, rax
+    cmp r14, 4
+    je .simple
 .pick:
     mov ecx, 1
     mov edx, 12
@@ -1643,6 +1675,64 @@ frac_one:
     mov rdx, [rsp+48]
     call pfrac
     emit 10
+    jmp .out
+.simple:
+    ; just one fraction to put in lowest terms: m/k times g over g
+    mov ecx, 2
+    mov edx, 12
+    call rnd
+    mov r12, rax                ; k
+.sm:
+    mov ecx, 1
+    lea rdx, [r12+r12]
+    call rnd
+    mov rbx, rax                ; m
+    mov rcx, rbx
+    mov rdx, r12
+    call gcd
+    cmp rax, 1
+    jne .sm
+    mov ecx, 1
+    mov edx, 12
+    call rnd
+    mov r13, rax                ; g, 1 = it's already as simple as it gets
+    imul rbx, r13
+    imul r12, r13
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    mov r15, rax
+    emit "user: "
+    lea rcx, [fsq]
+    mov rcx, [rcx+r15*8]
+    call emz
+    num rbx
+    emit "/"
+    num r12
+    lea rcx, [fss]
+    mov rcx, [rcx+r15*8]
+    call emz
+    emit 10
+    emit "assistant: "
+    mov rcx, rbx
+    mov rdx, r12
+    call simp
+    mov [rsp+40], rax
+    mov [rsp+48], rdx
+    num rbx
+    emit "/"
+    num r12
+    cmp r13, 1
+    jne .sme
+    emit " is already in lowest terms.", 10
+    jmp .out
+.sme:
+    emit " = "
+    mov rcx, [rsp+40]
+    mov rdx, [rsp+48]
+    call pfrac
+    emit 10
+.out:
     add rsp, 88
     pop r15
     pop r14
@@ -1731,7 +1821,7 @@ pow_one:
     call rnd
     mov rbx, rax                ; b
     mov ecx, 2
-    mov edx, 6
+    mov edx, 12
     call rnd
     mov r12, rax                ; n
     xor ecx, ecx
@@ -1810,6 +1900,8 @@ pow_one:
     num rbx
     emit "^"
     num r12
+    cmp r12, 4                  ; past 4 nobody counts out the whole row
+    ja .many
     emit " = "
     mov r15, r12
 .ml:
@@ -1818,8 +1910,16 @@ pow_one:
     jz .mld
     emit " × "
     jmp .ml
+.many:
+    emit " is "
+    num r12
+    emit " "
+    num rbx
+    emit "s multiplied together.", 10
+    jmp .pc
 .mld:
     emit 10
+.pc:
     mov rcx, rbx
     mov rdx, r12
     call powchain

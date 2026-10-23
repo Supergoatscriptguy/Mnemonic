@@ -330,15 +330,8 @@ seq_one:
     cmp r15, 2
     je .ga
     ; arithmetic: first + (n - 1) × step
-    lea rax, [rbx+r12]
-    mov [rsp+40], rax
-    emit "Each term changes by the same amount: "
-    sint [rsp+40]
-    emit " - "
-    pint rbx
-    emit " = "
-    sint r12
-    emit ". So term n is "
+    call seqcheck
+    emit "So term n is "
     sint rbx
     emit " + (n - 1) × "
     pint r12
@@ -371,16 +364,8 @@ seq_one:
     emit 10
     jmp .fin
 .ga:
-    lea rax, [rbx]
-    imul rax, r12
-    mov [rsp+40], rax
-    emit "Each term is the one before times the same number: "
-    num [rsp+40]
-    emit " ÷ "
-    num rbx
-    emit " = "
-    num r12
-    emit ". So term n is "
+    call seqcheck
+    emit "So term n is "
     num rbx
     emit " × "
     num r12
@@ -415,6 +400,80 @@ seq_one:
     pop r12
     pop rsi
     pop rbx
+    ret
+
+; which kind it is, checked on all four terms (2, 4 could start either): the
+; differences, and when they don't match, the ratios. from seq_one's rbx, r12, r15
+seqcheck:
+    push rsi
+    push r13
+    push r14
+    sub rsp, 48
+    mov r13, rbx                ; this term
+    xor r14d, r14d
+    emit "Differences: "
+.d:
+    test r14, r14
+    jz .d1
+    emit ", "
+.d1:
+    mov rax, r13                ; the next term
+    cmp r15, 2
+    je .dg
+    add rax, r12
+    jmp .dn
+.dg:
+    imul rax, r12
+.dn:
+    mov [rsp+32], rax
+    sint rax
+    emit " - "
+    pint r13
+    emit " = "
+    mov rax, [rsp+32]
+    sub rax, r13
+    sint rax
+    mov r13, [rsp+32]
+    inc r14
+    cmp r15, 2
+    jne .da
+    cmp r14, 2                  ; two that differ are enough
+    jb .d
+    emit ". Not the same, so try ratios: "
+    mov r13, rbx
+    xor r14d, r14d
+.r:
+    test r14, r14
+    jz .r1
+    emit ", "
+.r1:
+    mov rax, r13
+    imul rax, r12
+    mov [rsp+32], rax
+    num rax
+    emit " ÷ "
+    num r13
+    emit " = "
+    num r12
+    mov r13, [rsp+32]
+    inc r14
+    cmp r14, 3
+    jb .r
+    emit ". All the same, so each term is "
+    num r12
+    emit " times the one before.", 10
+    jmp .x
+.da:
+    cmp r14, 3
+    jb .d
+    emit ". All the same, so each term changes by "
+    sint r12
+    emit ".", 10
+.x:
+    add rsp, 48
+    pop r14
+    pop r13
+    pop rsi
     ret
 
 ; seq_one's first four terms and "...", from rbx (first), r12 (step or ratio),

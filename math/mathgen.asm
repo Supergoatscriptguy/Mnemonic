@@ -1660,6 +1660,8 @@ check1:
     sint rbx
     emit " × "
     pint r13
+    test r12, r12
+    jz .z
     mov rcx, r12
     xor edx, edx
     call sterm
@@ -1675,6 +1677,13 @@ check1:
     mov rax, [rsp+32]
     add rax, r12
     sint rax
+    jmp .r
+.z:
+    emit " = "                  ; nothing to add
+    mov rax, rbx
+    imul rax, r13
+    sint rax
+.r:
     add rsp, 40
     pop r13
     pop r12
@@ -1711,13 +1720,20 @@ lin_one:
     test eax, eax
     jnz .b
     neg r12
+    xor r13d, r13d              ; b, 0 one time in 8: 5y = 3y + 14
+    xor ecx, ecx
+    mov edx, 7
+    call rnd
+    test eax, eax
+    jz .b0
 .b:
     mov rcx, -40
     mov edx, 40
     call rnd
     test rax, rax
     jz .b
-    mov r13, rax                ; b
+    mov r13, rax
+.b0:
     xor r14d, r14d              ; c, the right side's own x (0 = none)
     xor ecx, ecx
     mov edx, 1
@@ -1847,6 +1863,7 @@ lin_one:
     sub rax, r13
     mov [rsp+48], rax           ; what the x's equal
     test r13, r13
+    jz .dv                      ; no number to move
     js .addb
     emit "Subtract "
     num r13
@@ -1877,6 +1894,7 @@ lin_one:
     emit " = "
     sint [rsp+48]
     emit 10
+.dv:
     emit "Divide both sides by "
     sint [rsp+40]
     emit ": "
