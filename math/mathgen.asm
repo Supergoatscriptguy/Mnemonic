@@ -1,7 +1,9 @@
-; mathgen [n=1000] [seed=1] [out=datasets\math\arith.txt]: arithmetic problems worked
-; out step by step, as conversations in chatdocs' text format. long multiplication and
-; long division for now. every digit step gets a line of its own, so the numbers in it
-; stay small (under 100 is one token) and the steps always look the same
+; mathgen [n=1000] [seed=1] [out=datasets\math\arith.txt]: math problems worked out
+; step by step, as conversations in chatdocs' text format: long multiplication and
+; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
+; long division. every step gets a line of its own, so the numbers in it stay small
+; (under 100 is one token) and the steps always look the same. the last line of an
+; answer is the answer, and a "# topic" line before each problem says what it is
 default rel
 bits 64
 %include "lib.inc"
@@ -55,6 +57,51 @@ qdiv dq mq0, do0, ms0,  dq0, mo2, ms1,  mq2, do1, ms0,  empty, do2, ms2
      dq dq1, do0, empty,  dq2, do0, ds0
 NQDIV equ 6
 
+; one-thing questions: before, after
+fq0 db "Find the prime factorization of ", 0
+fq1 db "What is the prime factorization of ", 0
+fq2 db "Factor ", 0
+fq3 db "Write ", 0
+fq4 db "What are the prime factors of ", 0
+fs0 db " into primes.", 0
+fs1 db " as a product of primes.", 0
+align 8
+qfac dq fq0, ms1,  fq1, ms0,  fq2, fs0,  fq3, fs1,  fq4, ms0
+NQFAC equ 5
+
+qq0 db "Can you factor ", 0
+qq1 db "Factorise ", 0
+qs0 db " completely.", 0
+qs1 db " factored?", 0
+align 8
+qquad dq fq2, ms1,  fq2, qs0,  qq0, ms0,  mq0, qs1,  qq1, ms1
+NQQUAD equ 5
+
+; two-polynomial questions: before, between, after
+pq0 db "What is (", 0
+pq1 db "Use long division to divide ", 0
+pq2 db "Work out (", 0
+pm0 db ") ÷ (", 0
+pm1 db ") / (", 0
+ps0 db ")?", 0
+ps1 db ").", 0
+align 8
+qpdiv dq dq0, mo2, ms1,  pq0, pm0, ps0,  pq1, mo2, ms1,  pq2, pm1, ps1
+NQPDIV equ 4
+
+letters db "xynt"
+
+align 8
+topics dq mul_one, div_one, factor_one, lin_one, quad_one, pdiv_one
+tname  dq tn0, tn1, tn2, tn3, tn4, tn5
+NTOPIC equ 6
+tn0 db "# mul", 10, 0
+tn1 db "# div", 10, 0
+tn2 db "# primes", 10, 0
+tn3 db "# linear", 10, 0
+tn4 db "# quadratic", 10, 0
+tn5 db "# polydiv", 10, 0
+
 section .bss
 alignb 8
 rng      resb RNG_SIZE
@@ -69,6 +116,15 @@ rows     resq 4
 adig     resb 24                ; digits, the ones first
 bdig     resb 24
 qdig     resb 24
+primes   resq 168               ; the ones under 1000
+nprimes  resq 1
+nf       resq 1                 ; a factorization: its primes and their powers
+fp       resq 24
+fe       resq 24
+cf       resq 8                 ; a polynomial for poly, highest power first
+qc       resq 4                 ; polynomial division: quotient, dividend
+pc       resq 5
+letter   resb 1                 ; the variable
 
 section .text
 
@@ -78,6 +134,33 @@ section .text
     mov rcx, rdi
     call fmt_dec
     mov rdi, rax
+%endmacro
+
+; the same, signed
+%macro sint 1
+    mov rdx, %1
+    mov rcx, rdi
+    call fmt_int
+    mov rdi, rax
+%endmacro
+
+; signed, in brackets if it's negative: 3 × (-5)
+%macro pint 1
+    mov rdx, %1
+    test rdx, rdx
+    jns %%pos
+    mov byte [rdi], '('
+    inc rdi
+    mov rcx, rdi
+    call fmt_int
+    mov byte [rax], ')'
+    lea rdi, [rax+1]
+    jmp %%done
+%%pos:
+    mov rcx, rdi
+    call fmt_dec
+    mov rdi, rax
+%%done:
 %endmacro
 
 global start
@@ -113,21 +196,22 @@ start:
     call mem_alloc
     mov [buf], rax
     mov rdi, rax
+    call mkprimes
     emit "# made by bin\mathgen, don't edit", 10, 10
     xor ebx, ebx
 .p:
     cmp rbx, [nprob]
     jae .done
     xor ecx, ecx
-    mov edx, 1
+    mov edx, NTOPIC - 1
     call rnd
-    test eax, eax
-    jz .div
-    call mul_one
-    jmp .next
-.div:
-    call div_one
-.next:
+    mov [rsp+32], rax
+    lea rcx, [tname]
+    mov rcx, [rcx+rax*8]
+    call emz
+    mov rax, [rsp+32]
+    lea rcx, [topics]
+    call [rcx+rax*8]
     emit 10
     inc rbx
     mov rax, rdi
@@ -669,6 +753,996 @@ div_one:
 .exact:
     emit 10
     add rsp, 40
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; ---- algebra
+
+; the primes under 1000, by trial division
+mkprimes:
+    xor r8d, r8d
+    mov r9d, 2
+.c:
+    cmp r9, 1000
+    jae .done
+    xor r10d, r10d
+.t:
+    cmp r10, r8
+    jae .yes
+    lea rax, [primes]
+    mov r11, [rax+r10*8]
+    mov rax, r11
+    imul rax, r11
+    cmp rax, r9
+    ja .yes
+    mov rax, r9
+    xor edx, edx
+    div r11
+    test rdx, rdx
+    jz .no
+    inc r10
+    jmp .t
+.yes:
+    lea rax, [primes]
+    mov [rax+r8*8], r9
+    inc r8
+.no:
+    inc r9
+    jmp .c
+.done:
+    mov [nprimes], r8
+    ret
+
+; rcx = question table (before, after), edx = how many. "user: " and the before part
+; at rdi, rax = the after part
+askpre:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    lea rdx, [rdx-1]
+    xor ecx, ecx
+    call rnd
+    shl rax, 4
+    add rbx, rax
+    emit "user: "
+    mov rcx, [rbx]
+    call emz
+    mov rax, [rbx+8]
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; the same for (before, between, after): rax = between, rdx = after
+askpre3:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    lea rdx, [rdx-1]
+    xor ecx, ecx
+    call rnd
+    imul rax, rax, 24
+    add rbx, rax
+    emit "user: "
+    mov rcx, [rbx]
+    call emz
+    mov rax, [rbx+8]
+    mov rdx, [rbx+16]
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; the variable at rdi
+letr:
+    mov al, [letter]
+    mov [rdi], al
+    inc rdi
+    ret
+
+; rcx = coefficient, rdx = power. the term on its own: 3x^2, -x, x, 7, 0x
+mono:
+    push rbx
+    push r12
+    sub rsp, 40
+    mov rbx, rcx
+    mov r12, rdx
+    test r12, r12
+    jnz .var
+    sint rbx
+    jmp .r
+.var:
+    cmp rbx, 1
+    je .x
+    cmp rbx, -1
+    jne .c
+    mov byte [rdi], '-'
+    inc rdi
+    jmp .x
+.c:
+    sint rbx
+.x:
+    call letr
+    cmp r12, 2
+    jb .r
+    mov byte [rdi], '^'
+    inc rdi
+    num r12
+.r:
+    add rsp, 40
+    pop r12
+    pop rbx
+    ret
+
+; the same, in brackets if it's negative: (-8x)
+pmono:
+    test rcx, rcx
+    jns mono
+    sub rsp, 40
+    mov byte [rdi], '('
+    inc rdi
+    call mono
+    mov byte [rdi], ')'
+    inc rdi
+    add rsp, 40
+    ret
+
+; rcx = coefficient, rdx = power: " + 3x^2" or " - 3x^2", for after the first term
+sterm:
+    sub rsp, 40
+    mov byte [rdi], ' '
+    mov byte [rdi+1], '+'
+    mov byte [rdi+2], ' '
+    test rcx, rcx
+    jns .go
+    mov byte [rdi+1], '-'
+    neg rcx
+.go:
+    add rdi, 3
+    call mono
+    add rsp, 40
+    ret
+
+; rcx = coefficients, highest power first, rdx = the degree. zero terms are left out
+poly:
+    push rbx
+    push r12
+    push r13
+    push r14
+    sub rsp, 40
+    mov rbx, rcx
+    mov r12, rdx
+    xor r13d, r13d
+    xor r14d, r14d              ; terms written
+.t:
+    cmp r13, r12
+    ja .end
+    mov rcx, [rbx+r13*8]
+    test rcx, rcx
+    jz .n
+    mov rdx, r12
+    sub rdx, r13
+    test r14, r14
+    jnz .more
+    call mono
+    jmp .w
+.more:
+    call sterm
+.w:
+    inc r14
+.n:
+    inc r13
+    jmp .t
+.end:
+    test r14, r14
+    jnz .r
+    mov byte [rdi], '0'
+    inc rdi
+.r:
+    add rsp, 40
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; rcx = a, rdx = b: ax + b
+lin:
+    sub rsp, 40
+    mov [cf], rcx
+    mov [cf+8], rdx
+    lea rcx, [cf]
+    mov edx, 1
+    call poly
+    add rsp, 40
+    ret
+
+; r13 = b, r14 = c: x^2 + bx + c
+quadp:
+    sub rsp, 40
+    mov qword [cf], 1
+    mov [cf+8], r13
+    mov [cf+16], r14
+    lea rcx, [cf]
+    mov edx, 2
+    call poly
+    add rsp, 40
+    ret
+
+; rcx = u: (x + u) or (x - |u|)
+binom:
+    sub rsp, 40
+    mov byte [rdi], '('
+    mov byte [rdi+1], 'x'
+    add rdi, 2
+    xor edx, edx
+    call sterm
+    mov byte [rdi], ')'
+    inc rdi
+    add rsp, 40
+    ret
+
+; rcx = u, rdx = v: (x + u)(x + v), or (x + u)^2
+twobin:
+    push rbx
+    push rsi
+    push r12
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, rdx
+    call binom
+    cmp rbx, r12
+    jne .two
+    emit "^2"
+    jmp .r
+.two:
+    mov rcx, r12
+    call binom
+.r:
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a prime that just went in: on the end of the factorization, or one more power
+addfac:
+    mov rax, [nf]
+    test rax, rax
+    jz .new
+    lea rdx, [fp]
+    cmp [rdx+rax*8-8], rcx
+    jne .new
+    lea rdx, [fe]
+    inc qword [rdx+rax*8-8]
+    ret
+.new:
+    lea rdx, [fp]
+    mov [rdx+rax*8], rcx
+    lea rdx, [fe]
+    mov qword [rdx+rax*8], 1
+    inc qword [nf]
+    ret
+
+; the prime factorization of a number made of 2-5 primes under 100, a quarter of them
+; with one between 100 and 1000 as well
+factor_one:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    mov r12d, 1
+    mov ecx, 2
+    mov edx, 5
+    call rnd
+    mov r13, rax
+.pick:
+    test r13, r13
+    jz .big
+    dec r13
+    xor ecx, ecx
+    mov edx, 24
+    call rnd
+    mov r14, rax
+    xor ecx, ecx
+    mov edx, 24
+    call rnd
+    cmp rax, r14
+    cmovb r14, rax              ; the smaller of two picks: small primes come up more
+    lea rax, [primes]
+    mov rax, [rax+r14*8]
+    imul rax, r12
+    cmp rax, 99999
+    ja .pick
+    mov r12, rax
+    jmp .pick
+.big:
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    test eax, eax
+    jnz .ask
+    mov ecx, 25
+    mov rdx, [nprimes]
+    dec rdx
+    call rnd
+    lea rcx, [primes]
+    mov rax, [rcx+rax*8]
+    imul rax, r12
+    cmp rax, 999999
+    ja .ask
+    mov r12, rax
+.ask:
+    lea rcx, [qfac]
+    mov edx, NQFAC
+    call askpre
+    mov rbx, rax
+    num r12
+    mov rcx, rbx
+    call emz
+    emit 10
+    emit "assistant: Divide by the smallest prime that goes in, again and again.", 10
+    mov r13, r12                ; what's left
+    xor r14d, r14d              ; which prime
+    mov qword [nf], 0
+.l:
+    lea rax, [primes]
+    mov r15, [rax+r14*8]
+    mov rax, r15
+    imul rax, r15
+    cmp rax, r13
+    jbe .try
+    ; nothing up to its square root goes in, so it's prime
+    mov [rsp+32], rax
+    num r13
+    emit " is prime, since "
+    num r15
+    emit " × "
+    num r15
+    emit " = "
+    num [rsp+32]
+    emit " is more than "
+    num r13
+    emit ".", 10
+    mov rcx, r13
+    call addfac
+    jmp .all
+.try:
+    mov rax, r13
+    xor edx, edx
+    div r15
+    mov [rsp+32], rax
+    mov [rsp+40], rdx
+    num r13
+    emit " ÷ "
+    num r15
+    emit " = "
+    num [rsp+32]
+    cmp qword [rsp+40], 0
+    jne .no
+    emit 10
+    mov rcx, r15
+    call addfac
+    mov r13, [rsp+32]
+    jmp .l
+.no:
+    emit " remainder "
+    num [rsp+40]
+    emit ", no", 10
+    inc r14
+    jmp .l
+.all:
+    num r12
+    emit " = "
+    xor r13d, r13d
+.f:
+    cmp r13, [nf]
+    jae .end
+    test r13, r13
+    jz .first
+    emit " × "
+.first:
+    lea rax, [fp]
+    num [rax+r13*8]
+    lea rax, [fe]
+    mov rax, [rax+r13*8]
+    cmp rax, 1
+    je .e1
+    mov [rsp+32], rax
+    emit "^"
+    num [rsp+32]
+.e1:
+    inc r13
+    jmp .f
+.end:
+    emit 10
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a, rdx = b, r8 = the answer: "a × (x) + b = ax + b = the value"
+check1:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    sub rsp, 40
+    mov rbx, rcx
+    mov r12, rdx
+    mov r13, r8
+    sint rbx
+    emit " × "
+    pint r13
+    mov rcx, r12
+    xor edx, edx
+    call sterm
+    emit " = "
+    mov rax, rbx
+    imul rax, r13
+    mov [rsp+32], rax
+    sint rax
+    mov rcx, r12
+    xor edx, edx
+    call sterm
+    emit " = "
+    mov rax, [rsp+32]
+    add rax, r12
+    sint rax
+    add rsp, 40
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; solve ax + b = c, or ax + b = cx + d, for a whole number, in one of a few letters
+lin_one:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    lea rcx, [letters]
+    mov al, [rcx+rax]
+    mov [letter], al
+    mov rcx, -15
+    mov edx, 15
+    call rnd
+    mov rbx, rax                ; the answer
+    mov ecx, 2
+    mov edx, 12
+    call rnd
+    mov r12, rax                ; a
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    test eax, eax
+    jnz .b
+    neg r12
+.b:
+    mov rcx, -40
+    mov edx, 40
+    call rnd
+    test rax, rax
+    jz .b
+    mov r13, rax                ; b
+    xor r14d, r14d              ; c, the right side's own x (0 = none)
+    xor ecx, ecx
+    mov edx, 1
+    call rnd
+    test eax, eax
+    jz .rhs
+.cc:
+    mov rcx, -9
+    mov edx, 9
+    call rnd
+    test rax, rax
+    jz .cc
+    mov rdx, r12
+    sub rdx, rax
+    cmp rdx, 2
+    jge .ccok
+    cmp rdx, -2
+    jg .cc                      ; a - c is at least 2 either way
+.ccok:
+    mov r14, rax
+.rhs:
+    mov r15, r12
+    sub r15, r14
+    imul r15, rbx
+    add r15, r13                ; the right side's number
+    ; the question, four ways
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    mov [rsp+32], rax
+    emit "user: "
+    mov rax, [rsp+32]
+    cmp rax, 1
+    jb .q0
+    je .q1
+    cmp rax, 2
+    je .q2
+    emit "What is "
+    call letr
+    emit " when "
+    jmp .eq
+.q0:
+    emit "Solve "
+    jmp .eq
+.q1:
+    emit "Solve for "
+    call letr
+    emit ": "
+    jmp .eq
+.q2:
+    emit "Find "
+    call letr
+    emit " if "
+.eq:
+    mov rcx, r12
+    mov rdx, r13
+    call lin
+    emit " = "
+    mov rcx, r14
+    mov rdx, r15
+    call lin
+    mov rax, [rsp+32]
+    cmp rax, 1
+    je .s1
+    cmp rax, 3
+    je .s3
+    emit "."
+    jmp .s1
+.s3:
+    emit "?"
+.s1:
+    emit 10
+    emit "assistant: Get "
+    call letr
+    emit " by itself.", 10
+    mov [rsp+40], r12           ; the left side's x
+    test r14, r14
+    jz .one
+    js .addx
+    emit "Subtract "
+    mov rcx, r14
+    xor edx, edx
+    call lin
+    emit " from both sides: "
+    jmp .moved
+.addx:
+    emit "Add "
+    mov rcx, r14
+    neg rcx
+    xor edx, edx
+    call lin
+    emit " to both sides: "
+.moved:
+    mov rcx, r12
+    sub rcx, r14
+    mov [rsp+40], rcx
+    mov rdx, r13
+    call lin
+    emit " = "
+    sint r15
+    emit 10
+.one:
+    mov rax, r15
+    sub rax, r13
+    mov [rsp+48], rax           ; what the x's equal
+    test r13, r13
+    js .addb
+    emit "Subtract "
+    num r13
+    emit " from both sides: "
+    mov rcx, [rsp+40]
+    xor edx, edx
+    call lin
+    emit " = "
+    sint r15
+    emit " - "
+    num r13
+    jmp .bdone
+.addb:
+    emit "Add "
+    mov rax, r13
+    neg rax
+    mov [rsp+56], rax
+    num rax
+    emit " to both sides: "
+    mov rcx, [rsp+40]
+    xor edx, edx
+    call lin
+    emit " = "
+    sint r15
+    emit " + "
+    num [rsp+56]
+.bdone:
+    emit " = "
+    sint [rsp+48]
+    emit 10
+    emit "Divide both sides by "
+    sint [rsp+40]
+    emit ": "
+    call letr
+    emit " = "
+    sint [rsp+48]
+    emit " ÷ "
+    pint [rsp+40]
+    emit " = "
+    sint rbx
+    emit 10
+    ; check it in the equation as it was asked
+    emit "Check: "
+    mov rcx, r12
+    mov rdx, r13
+    mov r8, rbx
+    call check1
+    test r14, r14
+    jz .chk
+    emit ", and "
+    mov rcx, r14
+    mov rdx, r15
+    mov r8, rbx
+    call check1
+.chk:
+    emit 10
+    call letr
+    emit " = "
+    sint rbx
+    emit 10
+    add rsp, 72
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; factor x^2 + bx + c = (x + p)(x + q), p and q whole numbers from -12 to 12
+quad_one:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    mov byte [letter], 'x'
+.p:
+    mov rcx, -12
+    mov edx, 12
+    call rnd
+    test rax, rax
+    jz .p
+    mov rbx, rax
+.q:
+    mov rcx, -12
+    mov edx, 12
+    call rnd
+    test rax, rax
+    jz .q
+    mov r12, rax
+    lea r13, [rbx+r12]          ; b
+    mov r14, rbx
+    imul r14, r12               ; c
+    lea rcx, [qquad]
+    mov edx, NQQUAD
+    call askpre
+    mov [rsp+32], rax
+    call quadp
+    mov rcx, [rsp+32]
+    call emz
+    emit 10
+    emit "assistant: Find two numbers that multiply to "
+    sint r14
+    emit " and add to "
+    sint r13
+    emit ".", 10
+    mov r15, r14
+    test r15, r15
+    jns .abs
+    neg r15                     ; |c|
+.abs:
+    mov qword [rsp+40], 1       ; d, from 1 up to the square root of |c|
+.d:
+    mov rax, r15
+    xor edx, edx
+    div qword [rsp+40]
+    test rdx, rdx
+    jnz .dn
+    mov r8, [rsp+40]
+    mov r9, rax
+    ; c > 0: both have b's sign. c < 0: the bigger one does
+    test r14, r14
+    js .neg
+    test r13, r13
+    jns .set
+    neg r8
+    neg r9
+    jmp .set
+.neg:
+    test r13, r13
+    js .bneg
+    neg r8
+    jmp .set
+.bneg:
+    neg r9
+.set:
+    mov [rsp+48], r8
+    mov [rsp+56], r9
+    sint [rsp+48]
+    emit " × "
+    pint [rsp+56]
+    emit " = "
+    sint r14
+    emit ", "
+    sint [rsp+48]
+    emit " + "
+    pint [rsp+56]
+    emit " = "
+    mov rax, [rsp+48]
+    add rax, [rsp+56]
+    mov [rsp+64], rax
+    sint rax
+    cmp [rsp+64], r13
+    je .found
+    emit 10
+.dn:
+    inc qword [rsp+40]
+    mov rax, [rsp+40]
+    imul rax, rax
+    cmp rax, r15
+    jbe .d
+.found:
+    emit ", that's it", 10
+    emit "Check: "
+    mov rcx, [rsp+48]
+    mov rdx, [rsp+56]
+    call twobin
+    emit " = x^2"
+    mov rcx, [rsp+56]
+    mov edx, 1
+    call sterm
+    mov rcx, [rsp+48]
+    mov edx, 1
+    call sterm
+    mov rcx, r14
+    xor edx, edx
+    call sterm
+    emit " = "
+    call quadp
+    emit 10
+    call quadp
+    emit " = "
+    mov rcx, [rsp+48]
+    mov rdx, [rsp+56]
+    call twobin
+    emit 10
+    add rsp, 72
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; (a polynomial) ÷ (x - r) by long division: the quotient has degree 1-2 and no zero
+; terms, r is -6 to 6, half have a remainder
+pdiv_one:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    mov byte [letter], 'x'
+.r:
+    mov rcx, -6
+    mov edx, 6
+    call rnd
+    test rax, rax
+    jz .r
+    mov rbx, rax                ; r
+    mov ecx, 1
+    mov edx, 2
+    call rnd
+    mov r12, rax                ; the quotient's degree
+    mov ecx, 1
+    mov edx, 4
+    call rnd
+    mov [qc], rax
+    mov r13d, 1
+.qc:
+    cmp r13, r12
+    ja .rem
+    mov rcx, -9
+    mov edx, 9
+    call rnd
+    test rax, rax
+    jz .qc
+    lea rcx, [qc]
+    mov [rcx+r13*8], rax
+    inc r13
+    jmp .qc
+.rem:
+    xor r14d, r14d              ; the remainder
+    xor ecx, ecx
+    mov edx, 1
+    call rnd
+    test eax, eax
+    jz .p
+    mov rcx, -9
+    mov edx, 9
+    call rnd
+    mov r14, rax
+.p:
+    ; the dividend: (x - r) times the quotient, plus the remainder
+    mov rax, [qc]
+    mov [pc], rax
+    mov r13d, 1
+.pc:
+    cmp r13, r12
+    ja .last
+    lea rcx, [qc]
+    mov rax, [rcx+r13*8-8]
+    imul rax, rbx
+    neg rax
+    add rax, [rcx+r13*8]
+    lea rcx, [pc]
+    mov [rcx+r13*8], rax
+    inc r13
+    jmp .pc
+.last:
+    lea rcx, [qc]
+    mov rax, [rcx+r12*8]
+    imul rax, rbx
+    neg rax
+    add rax, r14
+    lea rcx, [pc]
+    mov [rcx+r13*8], rax
+    lea rcx, [qpdiv]
+    mov edx, NQPDIV
+    call askpre3
+    mov [rsp+32], rax
+    mov [rsp+40], rdx
+    lea rcx, [pc]
+    lea rdx, [r12+1]
+    call poly
+    mov rcx, [rsp+32]
+    call emz
+    mov ecx, 1
+    mov rdx, rbx
+    neg rdx
+    call lin
+    mov rcx, [rsp+40]
+    call emz
+    emit 10
+    emit "assistant: Long division, highest power first.", 10
+    mov r13, [pc]               ; the leading term's coefficient
+    xor r15d, r15d              ; step
+.s:
+    lea rax, [r12+1]
+    sub rax, r15
+    mov [rsp+48], rax           ; its power
+    ; 4x^2 ÷ x = 4x
+    mov rcx, r13
+    mov rdx, rax
+    call mono
+    emit " ÷ x = "
+    mov rcx, r13
+    mov rdx, [rsp+48]
+    dec rdx
+    call mono
+    emit 10
+    ; 4x × (x - 2) = 4x^2 - 8x
+    mov rcx, r13
+    mov rdx, [rsp+48]
+    dec rdx
+    call mono
+    emit " × ("
+    mov ecx, 1
+    mov rdx, rbx
+    neg rdx
+    call lin
+    emit ") = "
+    mov rcx, r13
+    mov rdx, [rsp+48]
+    call mono
+    mov rax, r13
+    imul rax, rbx
+    neg rax
+    mov [rsp+56], rax           ; what that puts on the next power
+    mov rcx, rax
+    mov rdx, [rsp+48]
+    dec rdx
+    call sterm
+    emit 10
+    ; subtract: -5x - (-8x) = 3x
+    lea rcx, [pc]
+    mov rax, [rcx+r15*8+8]
+    mov [rsp+64], rax
+    emit "subtract: "
+    mov rcx, [rsp+64]
+    mov rdx, [rsp+48]
+    dec rdx
+    call mono
+    emit " - "
+    mov rcx, [rsp+56]
+    mov rdx, [rsp+48]
+    dec rdx
+    call pmono
+    emit " = "
+    mov r13, [rsp+64]
+    sub r13, [rsp+56]
+    mov rcx, r13
+    mov rdx, [rsp+48]
+    dec rdx
+    call mono
+    inc r15
+    cmp r15, r12
+    ja .done                    ; that was the last step, r13 is the remainder
+    emit ", bring down "
+    lea rcx, [pc]
+    mov rcx, [rcx+r15*8+8]
+    mov rdx, [rsp+48]
+    sub rdx, 2
+    call mono
+    emit 10
+    jmp .s
+.done:
+    emit 10
+    emit "quotient "
+    lea rcx, [qc]
+    mov rdx, r12
+    call poly
+    emit ", remainder "
+    sint r13
+    emit 10
+    emit "("
+    lea rcx, [pc]
+    lea rdx, [r12+1]
+    call poly
+    emit ") ÷ ("
+    mov ecx, 1
+    mov rdx, rbx
+    neg rdx
+    call lin
+    emit ") = "
+    lea rcx, [qc]
+    mov rdx, r12
+    call poly
+    test r13, r13
+    jz .exact
+    emit ", remainder "
+    sint r13
+.exact:
+    emit 10
+    add rsp, 72
     pop r15
     pop r14
     pop r13
