@@ -176,7 +176,7 @@ letter   resb 1                 ; the variable
 section .text
 
 global rnd, ndig, digits, emz, ask, askpre, askpre3, letr, mono, pmono, sterm, poly, lin
-global mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom
+global mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom, sdiv
 global letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
 
 global start
@@ -1303,9 +1303,15 @@ factwork:
 .rem:
     cmp qword [rsp+40], 0
     jne .no
-    emit 10
     mov rcx, r15
     call addfac
+    emit " ("                   ; keep count, a long run of 2s is easy to lose
+    num r15
+    emit "^"
+    mov rax, [nf]
+    lea rcx, [fe]
+    num [rcx+rax*8-8]
+    emit " so far)", 10
     mov r13, [rsp+32]
     jmp .l
 .no:

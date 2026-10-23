@@ -165,12 +165,12 @@ t10q db WN, " buys ", WA, " packs of ", WI, " with ", WB, " in each pack, then g
 t10e db "First the packs: ", WA, " × ", WB, ". Then take away ", WC, ".", 0
 t11q db WN, " had ", WA, " dollars, spent ", WB, " on lunch and ", WC, " on a book. How much money is left?", 0
 t11e db "Take off ", WB, ", then take off ", WC, ".", 0
-t12q db "A rectangle is ", WA, " cm long and ", WB, " cm wide. What is its perimeter?", 0
-t12e db "The perimeter is 2 × (length + width): first ", WA, " + ", WB, ", then double it.", 0
-t12a db "Answer: ", WR, " cm", 0
-t13q db "A rectangle is ", WA, " m long and ", WB, " m wide. What is its area?", 0
-t13e db "Area is length × width: ", WA, " × ", WB, ".", 0
-t13a db "Answer: ", WR, " square meters", 0
+t12q db "A fence goes around a garden ", WA, " m long and ", WB, " m wide. How long is the fence?", 0
+t12e db "The fence is the perimeter, 2 × (length + width): first ", WA, " + ", WB, ", then double it.", 0
+t12a db "Answer: ", WR, " m", 0
+t13q db WN, "'s garden is ", WA, " m long and ", WB, " m wide. How much ground does it cover?", 0
+t13e db "That's its area, length × width: ", WA, " × ", WB, ".", 0
+t13a db "Answer: ", WR, " square m", 0
 t14q db WN, " scored ", WA, ", ", WB, " and ", WC, " points in three games. How many points is that in total?", 0
 t14e db "Add them up: ", WA, " + ", WB, ", then add ", WC, ".", 0
 t14a db "Answer: ", WR, " points", 0
@@ -295,7 +295,7 @@ section .text
 
 global mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
 global add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
-global order_one, word_one, sadd, coin, upto
+global order_one, word_one, sadd, coin, upto, powchain, divline
 
 ; ---- steps
 
@@ -657,6 +657,35 @@ simp:
     xor edx, edx
     div r13
     mov [rsp+40], rax
+    cmp rbx, 99
+    ja .big2
+    cmp r12, 99
+    jbe .small
+.big2:
+    emit "gcd = "               ; too big to divide in your head: short division
+    num r13
+    emit ", so divide the top and the bottom by it.", 10
+    mov rcx, rbx
+    mov rdx, r13
+    call divline
+    emit 10
+    mov rcx, r12
+    mov rdx, r13
+    call divline
+    emit 10
+    emit "so "
+    num rbx
+    emit "/"
+    num r12
+    emit " = "
+    mov rcx, [rsp+32]
+    mov rdx, [rsp+40]
+    call pfrac
+    emit 10
+    mov rax, [rsp+32]
+    mov rdx, [rsp+40]
+    jmp .r
+.small:
     emit "gcd = "
     num r13
     emit ": "
@@ -710,6 +739,100 @@ pfrac:
 .r:
     add rsp, 40
     pop r12
+    pop rbx
+    ret
+
+; rcx = b, rdx = k: b^2 up to b^k a line each, each labelled with its power so
+; nobody loses count: "3^3 = 9 × 3 = 27", or "3^7 = 729 × 3:" and the long
+; multiplication. rax = b^k
+powchain:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, rdx
+    mov r13, rbx                ; b^i so far
+    mov r14d, 1
+.l:
+    cmp r14, r12
+    jae .r
+    inc r14
+    num rbx
+    emit "^"
+    num r14
+    emit " = "
+    mov rcx, r13
+    mov rdx, rbx
+    call mulsmall
+    test eax, eax
+    jz .long
+    num r13
+    emit " × "
+    num rbx
+    emit " = "
+    imul r13, rbx
+    num r13
+    emit 10
+    jmp .l
+.long:
+    num r13
+    emit " × "
+    num rbx
+    emit ":", 10
+    mov rcx, r13
+    mov rdx, rbx
+    call mulstep
+    mov r13, rax
+    jmp .l
+.r:
+    mov rax, r13
+    test r12, r12
+    jnz .nz
+    mov eax, 1
+.nz:
+    add rsp, 32
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = n, rdx = d: "n ÷ d = q" when n is under 100, short division when it isn't.
+; rax = q
+divline:
+    push rbx
+    push rsi
+    push r12
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, rdx
+    num rbx
+    emit " ÷ "
+    num r12
+    cmp rbx, 99
+    ja .s
+    emit " = "
+    jmp .q
+.s:
+    emit ": "
+    mov rcx, rbx
+    mov rdx, r12
+    call sdiv
+    emit ", so "
+.q:
+    mov rax, rbx
+    xor edx, edx
+    div r12
+    mov rbx, rax
+    num rax
+    mov rax, rbx
+    add rsp, 32
+    pop r12
+    pop rsi
     pop rbx
     ret
 
@@ -1673,15 +1796,9 @@ pow_one:
     jmp .ml
 .mld:
     emit 10
-    mov rax, rbx
-    mov r15, r12
-.m:
-    dec r15
-    jz .md
-    mov rcx, rax
-    mov rdx, rbx
-    call mulstep
-    jmp .m
+    mov rcx, rbx
+    mov rdx, r12
+    call powchain
 .md:
     test r14, r14
     jz .fin

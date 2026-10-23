@@ -392,16 +392,9 @@ seq_one:
     emit "^(n - 1).", 10
     call nless
     lea r14, [r13-1]            ; r^(n-1) as a chain of products
-    mov rax, r12
-    mov [rsp+40], r14
-.gc:
-    dec qword [rsp+40]
-    jz .gcd
-    mov rcx, rax
-    mov rdx, r12
-    call mulstep
-    jmp .gc
-.gcd:
+    mov rcx, r12
+    mov rdx, r14
+    call powchain
     mov [rsp+48], rax
     num r12
     emit "^"
@@ -1391,16 +1384,9 @@ expeq_one:
     emit " by multiplying "
     num rbx
     emit "s until it gets there.", 10
-    mov rax, rbx
-    mov r15, r12
-.m:
-    dec r15
-    jz .md
-    mov rcx, rax
-    mov rdx, rbx
-    call mulstep
-    jmp .m
-.md:
+    mov rcx, rbx
+    mov rdx, r12
+    call powchain
     emit "So "
     num r13
     emit " = "

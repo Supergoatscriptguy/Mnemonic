@@ -1105,6 +1105,10 @@ stats_one:
     je .median
     cmp r15, 2
     je .mode
+    emit "Put them in order: "
+    lea rsi, [srt]
+    call plist
+    emit ".", 10
     lea rax, [srt]
     mov r13, [rax+r12*8-8]
     mov r14, [rax]

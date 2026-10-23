@@ -937,6 +937,47 @@ like_one:
 .gd:
     cmp r15, 2
     jb .gs
+    je .g2
+    emit ": "                   ; three or more: two at a time
+    mov qword [rsp+40], 0       ; terms added so far
+    xor ebx, ebx
+.ch:
+    cmp rbx, r12
+    jae .gs
+    lea rax, [lp]
+    cmp [rax+rbx*8], r13
+    jne .chn
+    lea rax, [lc]
+    mov rcx, [rax+rbx*8]
+    cmp qword [rsp+40], 0
+    jne .cadd
+    mov [rsp+48], rcx           ; the running sum starts at the first
+    inc qword [rsp+40]
+    jmp .chn
+.cadd:
+    mov [rsp+32], rcx
+    cmp qword [rsp+40], 1
+    je .c1
+    emit ", "
+.c1:
+    inc qword [rsp+40]
+    mov rcx, [rsp+48]
+    mov rdx, r13
+    call psum
+    emit " + "
+    mov rcx, [rsp+32]
+    mov rdx, r13
+    call pmono
+    emit " = "
+    mov rcx, [rsp+48]
+    add rcx, [rsp+32]
+    mov [rsp+48], rcx
+    mov rdx, r13
+    call psum
+.chn:
+    inc rbx
+    jmp .ch
+.g2:
     emit " = "
     mov rcx, r14
     mov rdx, r13

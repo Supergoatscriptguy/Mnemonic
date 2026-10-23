@@ -683,6 +683,9 @@ geo_ang:
     je .rn
     mov rcx, [rax+rbx*8]
     call emz
+    emit " ("
+    num rbx
+    emit " sides)"
     jmp .rq
 .rn:
     num rbx

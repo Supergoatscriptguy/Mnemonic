@@ -3,11 +3,11 @@
 
 ; mathgen.asm
 extern rnd, ndig, digits, emz, ask, askpre, askpre3, letr, mono, pmono, sterm, poly, lin
-extern mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom
+extern mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom, sdiv
 extern letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
 ; arith.asm
 extern mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
-extern sadd, coin, upto
+extern sadd, coin, upto, powchain, divline
 extern add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
 extern order_one, word_one
 ; algebra.asm
