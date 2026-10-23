@@ -60,8 +60,13 @@ so0 db "What is the mode of ", 0
 so1 db "Find the mode of ", 0
 sr0 db "Find the range of ", 0
 sr1 db "What is the range of ", 0
+sm2 db "mean of ", 0
+sd2 db "median of ", 0
+so2 db "mode of ", 0
+sr2 db "range of ", 0
 align 8
-qstat dq sm0, sdot, sm1, sq,  sd0, sdot, sd1, sq,  so0, sq, so1, sdot,  sr0, sdot, sr1, sq
+qstat dq sm0, sdot, sm1, sq, sm2, empty,  sd0, sdot, sd1, sq, sd2, empty
+      dq so0, sq, so1, sdot, so2, empty,  sr0, sdot, sr1, sq, sr2, empty
 
 ra0  db "Simplify the ratio ", 0
 ra1  db "Write the ratio ", 0
@@ -1083,10 +1088,11 @@ stats_one:
     inc rbx
     jmp .is
 .q:
-    call coin
+    xor ecx, ecx                ; 3 ways for each of the 4
+    mov edx, 2
+    call rnd
     shl rax, 4
-    mov rcx, r15
-    shl rcx, 5
+    imul rcx, r15, 48
     add rax, rcx
     lea rcx, [qstat]
     add rax, rcx

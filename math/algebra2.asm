@@ -289,9 +289,20 @@ seq_one:
     dec r13
     jmp .gn
 .q:
-    call coin
+    xor ecx, ecx
+    mov edx, 2
+    call rnd
     mov [rsp+32], rax
     emit "user: "
+    cmp qword [rsp+32], 2
+    jne .qa
+    call sterms                 ; the terms first, then the question
+    emit " what is the "
+    mov rcx, r13
+    call ord
+    emit " term?", 10
+    jmp .qz
+.qa:
     lea rcx, [qs0]
     cmp qword [rsp+32], 0
     je .q1
@@ -306,24 +317,7 @@ seq_one:
     lea rcx, [qss1]
 .q2:
     call emz
-    xor r14d, r14d              ; the first four terms
-    mov rax, rbx
-.t:
-    mov [rsp+40], rax
-    sint rax
-    emit ", "
-    mov rax, [rsp+40]
-    cmp r15, 2
-    je .tg
-    add rax, r12
-    jmp .tn
-.tg:
-    imul rax, r12
-.tn:
-    inc r14
-    cmp r14, 4
-    jb .t
-    emit "..."
+    call sterms
     lea rcx, [sq]
     cmp qword [rsp+32], 0
     je .q3
@@ -331,6 +325,7 @@ seq_one:
 .q3:
     call emz
     emit 10
+.qz:
     emit "assistant: "
     cmp r15, 2
     je .ga
@@ -420,6 +415,35 @@ seq_one:
     pop r12
     pop rsi
     pop rbx
+    ret
+
+; seq_one's first four terms and "...", from rbx (first), r12 (step or ratio),
+; r15 (2 = geometric)
+sterms:
+    push rsi
+    push r14
+    push r13
+    sub rsp, 32
+    xor r14d, r14d
+    mov r13, rbx
+.t:
+    sint r13
+    emit ", "
+    cmp r15, 2
+    je .g
+    add r13, r12
+    jmp .n
+.g:
+    imul r13, r12
+.n:
+    inc r14
+    cmp r14, 4
+    jb .t
+    emit "..."
+    add rsp, 32
+    pop r13
+    pop r14
+    pop rsi
     ret
 
 ; "For the 25th term, n - 1 = 24." from seq_one's r13

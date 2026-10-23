@@ -1,4 +1,4 @@
-; mathgen [n=1000] [seed=1] [split=train|eval|all] [skip=file] [out=datasets\math\arith.txt]: math problems worked out
+; mathgen [n=1000] [seed=1] [split=train|eval|all] [skip=file] [noise=1] [out=datasets\math\arith.txt]: math problems worked out
 ; step by step, as conversations in chatdocs' text format: long multiplication and
 ; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
 ; long division here, the rest of arithmetic in arith.asm and more algebra in
@@ -8,7 +8,7 @@
 ; split: a key for the problem itself (pkey) puts 1 in 16 in eval, and train never gets
 ; those, whatever the seed, the wording or how the working is written out. skip= leaves
 ; out every problem that's in another mathgen file, by the same key
-; uses: math\arith math\algebra math\decimal math\geometry math\algebra2
+; uses: math\arith math\algebra math\decimal math\geometry math\algebra2 math\noise
 default rel
 bits 64
 %include "lib.inc"
@@ -25,6 +25,7 @@ k_seed   db "seed", 0
 k_out    db "out", 0
 k_split  db "split", 0
 k_skip   db "skip", 0
+k_noise  db "noise", 0
 e_skip   db "can't read the skip file", 0
 d_split  db "train", 0
 s_eval   db "eval", 0
@@ -53,10 +54,14 @@ ms0 db "?", 0
 ms1 db ".", 0
 ms2 db " = ?", 0
 ms3 db " step by step?", 0
+mo5 db " multiplied by ", 0
+mq5 db "Find the product of ", 0
+mo6 db " and ", 0
 align 8
 qmul dq mq0, mo0, ms0,  mq1, mo0, ms1,  mq2, mo1, ms0,  mq3, mo2, ms1
-     dq empty, mo3, ms2,  mq4, mo4, ms3,  empty, mo0, empty
-NQMUL equ 7
+     dq empty, mo3, ms2,  mq4, mo4, ms3,  empty, mo0, empty,  empty, mo1, empty
+     dq mq0, mo5, ms0,  empty, mo4, empty,  mq5, mo6, ms1
+NQMUL equ 11
 
 dq0 db "Divide ", 0
 dq1 db "Do the long division: ", 0
@@ -65,10 +70,16 @@ do0 db " ÷ ", 0
 do1 db " divided by ", 0
 do2 db " / ", 0
 ds0 db " step by step.", 0
+dq3 db "How many times does ", 0
+dm3 db " go into ", 0
+dq4 db "How many ", 0
+dm4 db "s are in ", 0
 align 8
 qdiv dq mq0, do0, ms0,  dq0, mo2, ms1,  mq2, do1, ms0,  empty, do2, ms2
-     dq dq1, do0, empty,  dq2, do0, ds0
-NQDIV equ 6
+     dq dq1, do0, empty,  dq2, do0, ds0,  empty, do1, empty,  mq0, do2, ms0
+NQDIV equ 8
+qdivr dq dq3, dm3, ms0,  dq4, dm4, ms0          ; these say the divisor first
+NQDIVR equ 2
 
 ; one-thing questions: before, after
 fq0 db "Find the prime factorization of ", 0
@@ -78,9 +89,15 @@ fq3 db "Write ", 0
 fq4 db "What are the prime factors of ", 0
 fs0 db " into primes.", 0
 fs1 db " as a product of primes.", 0
+fq5 db "Factorize ", 0
+fq6 db "Break ", 0
+fs6 db " into its prime factors.", 0
+fq7 db "prime factors of ", 0
+fq8 db "What primes multiply to make ", 0
 align 8
 qfac dq fq0, ms1,  fq1, ms0,  fq2, fs0,  fq3, fs1,  fq4, ms0
-NQFAC equ 5
+     dq fq5, ms1,  fq6, fs6,  fq7, empty,  fq8, ms0
+NQFAC equ 9
 
 qq0 db "Can you factor ", 0
 qq1 db "Factorise ", 0
@@ -160,6 +177,7 @@ outp     resq 1
 nprob    resq 1
 split    resq 1                 ; 0 train, 1 eval, 2 all
 seen     resq 1                 ; skip='s problems by pkey, or 0
+noise    resq 1                 ; 1 = questions typed like people type them (noise.asm)
 nskip    resq 1
 na       resq 1
 nb       resq 1
@@ -197,9 +215,16 @@ start:
     lea rcx, [k_seed]
     mov edx, 1
     call cfg_int
+    mov [rsp+32], rax
     lea rcx, [rng]
     mov rdx, rax
     call rng_seed
+    mov rcx, [rsp+32]
+    call noise_seed
+    lea rcx, [k_noise]
+    mov edx, 1
+    call cfg_int
+    mov [noise], rax
     lea rcx, [k_out]
     lea rdx, [d_out]
     call cfg_str
@@ -273,6 +298,11 @@ start:
     mov rdi, [rsp+40]           ; the other split's: take it back
     jmp .p
 .kept:
+    cmp qword [noise], 0        ; (after keep: the split goes by the tidy question)
+    je .tidy
+    mov rcx, [rsp+40]
+    call noisify
+.tidy:
     emit 10
     inc rbx
     mov rax, rdi
@@ -962,11 +992,24 @@ div_one:
     mov ecx, eax
     call ndig
     mov rbx, rax                ; a
+    xor ecx, ecx
+    mov edx, 7
+    call rnd
+    test eax, eax
+    jz .rev
     lea rcx, [qdiv]
     mov edx, NQDIV
     mov r8, rbx
     mov r9, r12
     call ask
+    jmp .ans
+.rev:
+    lea rcx, [qdivr]            ; "how many times does 12 go into 1500"
+    mov edx, NQDIVR
+    mov r8, r12
+    mov r9, rbx
+    call ask
+.ans:
     emit "assistant: "
     mov rcx, rbx
     mov rdx, r12
@@ -1700,9 +1743,9 @@ lin_one:
     sub r15, r14
     imul r15, rbx
     add r15, r13                ; the right side's number
-    ; the question, four ways
+    ; the question, seven ways, the last three with the equation first
     xor ecx, ecx
-    mov edx, 3
+    mov edx, 6
     call rnd
     mov [rsp+32], rax
     emit "user: "
@@ -1712,6 +1755,14 @@ lin_one:
     je .q1
     cmp rax, 2
     je .q2
+    cmp rax, 4
+    jb .q3
+    je .eq
+    cmp rax, 5
+    je .eq
+    emit "If "
+    jmp .eq
+.q3:
     emit "What is "
     call letr
     emit " when "
@@ -1741,6 +1792,21 @@ lin_one:
     je .s1
     cmp rax, 3
     je .s3
+    cmp rax, 5
+    je .s5
+    ja .s4
+    cmp rax, 4
+    je .s4
+    emit "."
+    jmp .s1
+.s4:
+    emit ", what is "
+    call letr
+    emit "?"
+    jmp .s1
+.s5:
+    emit ". Find "
+    call letr
     emit "."
     jmp .s1
 .s3:

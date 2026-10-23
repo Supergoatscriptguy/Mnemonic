@@ -25,6 +25,11 @@ sp_circ db "A circle's circumference is 2 × π × radius.", 10, 0
 q_area  db " What is its area?", 10, 0
 q_perim db " What is its perimeter?", 10, 0
 q_circ  db " What is its circumference?", 10, 0
+g_sq    db "square", 0
+g_rect  db "rectangle", 0
+g_tri   db "triangle", 0
+g_par   db "parallelogram", 0
+g_circ  db "circle", 0
 
 ; triples a, b, c
 trip dq 3, 4, 5,  5, 12, 13,  8, 15, 17,  7, 24, 25,  20, 21, 29,  9, 40, 41,  12, 35, 37
@@ -164,10 +169,21 @@ geo_flat:
     mov edx, 30
     call rnd
     mov rbx, rax
+    call coin
+    test eax, eax
+    jz .sq1
+    lea rcx, [g_sq]             ; "What is the area of a square with sides of 7 cm?"
+    call whatis
+    emit "with sides of "
+    nu rbx
+    call qend
+    jmp .sq2
+.sq1:
     emit "user: A square has sides of "
     nu rbx
     emit "."
     call aorp
+.sq2:
     test r14, r14
     jnz .sqp
     lea rcx, [sa_sq]
@@ -192,12 +208,25 @@ geo_flat:
     lea rdx, [rbx-1]
     call rnd
     mov r12, rax
+    call coin
+    test eax, eax
+    jz .re1
+    lea rcx, [g_rect]
+    call whatis
+    nu rbx
+    emit " long and "
+    nu r12
+    emit " wide"
+    call qend
+    jmp .re2
+.re1:
     emit "user: A rectangle is "
     nu rbx
     emit " long and "
     nu r12
     emit " wide."
     call aorp
+.re2:
     test r14, r14
     jnz .rp
     lea rcx, [sa_rect]
@@ -218,6 +247,19 @@ geo_flat:
     jmp .line
 .tri:
     call tbh
+    call coin
+    test eax, eax
+    jz .tr1
+    xor r14d, r14d              ; only ever the area
+    lea rcx, [g_tri]
+    call whatis
+    emit "with a base of "
+    nu rbx
+    emit " and a height of "
+    nu r12
+    call qend
+    jmp .tr2
+.tr1:
     emit "user: A triangle has a base of "
     nu rbx
     emit " and a height of "
@@ -226,6 +268,7 @@ geo_flat:
     lea rcx, [q_area]
     call emz
     emit "assistant: "
+.tr2:
     lea rcx, [sa_tri]
     call emz
     mov rcx, rbx
@@ -244,6 +287,19 @@ geo_flat:
     mov edx, 40
     call rnd
     mov r12, rax
+    call coin
+    test eax, eax
+    jz .pa1
+    xor r14d, r14d
+    lea rcx, [g_par]
+    call whatis
+    emit "with a base of "
+    nu rbx
+    emit " and a height of "
+    nu r12
+    call qend
+    jmp .pa2
+.pa1:
     emit "user: A parallelogram has a base of "
     nu rbx
     emit " and a height of "
@@ -252,6 +308,7 @@ geo_flat:
     lea rcx, [q_area]
     call emz
     emit "assistant: "
+.pa2:
     lea rcx, [sa_par]
     call emz
     mov rcx, rbx
@@ -306,6 +363,26 @@ geo_flat:
     mov rbx, rax                ; r
     call coin
     mov r12, rax                ; 1 = given the diameter
+    call coin
+    test eax, eax
+    jz .ci1
+    lea rcx, [g_circ]           ; "What is the area of a circle with a radius of 5 cm?"
+    call whatis
+    emit "with a "
+    test r12, r12
+    jnz .cid
+    emit "radius of "
+    nu rbx
+    jmp .cie
+.cid:
+    emit "diameter of "
+    lea rax, [rbx+rbx]
+    mov [rsp+32], rax
+    nu [rsp+32]
+.cie:
+    call qend
+    jmp .ca
+.ci1:
     emit "user: A circle has a "
     test r12, r12
     jnz .cd
@@ -326,6 +403,7 @@ geo_flat:
 .cq2:
     call emz
     emit "assistant: "
+.ca:
     test r12, r12
     jz .cr
     emit "The radius is half the diameter.", 10
@@ -375,6 +453,45 @@ geo_flat:
     pop r12
     pop rsi
     pop rbx
+    ret
+
+; rcx = the shape: "user: What is the area of a square " (perimeter when r14 = 1,
+; circumference for a circle)
+whatis:
+    push rsi
+    push r12
+    sub rsp, 40
+    mov r12, rcx
+    emit "user: What is the "
+    test r14, r14
+    jz .a
+    lea rax, [g_circ]
+    cmp r12, rax
+    je .c
+    emit "perimeter"
+    jmp .of
+.c:
+    emit "circumference"
+    jmp .of
+.a:
+    emit "area"
+.of:
+    emit " of a "
+    mov rcx, r12
+    call emz
+    emit " "
+    add rsp, 40
+    pop r12
+    pop rsi
+    ret
+
+; "?" and "assistant: "
+qend:
+    push rsi
+    sub rsp, 32
+    emit "?", 10, "assistant: "
+    add rsp, 32
+    pop rsi
     ret
 
 ; " What is its area/perimeter?" and "assistant: ", from r14
@@ -434,11 +551,22 @@ geo_vol:
     mov edx, 20
     call rnd
     mov r12, rax
+    call coin
+    test eax, eax
+    jz .cy1
+    emit "user: What is the volume of a cylinder with a radius of "
+    nu rbx
+    emit " and a height of "
+    nu r12
+    emit "?", 10
+    jmp .cy2
+.cy1:
     emit "user: A cylinder has a radius of "
     nu rbx
     emit " and a height of "
     nu r12
     emit ". What is its volume?", 10
+.cy2:
     emit "assistant: A cylinder's volume is π × radius^2 × height.", 10
     mov rcx, rbx
     mov rdx, rbx
@@ -456,9 +584,18 @@ geo_vol:
     mov edx, 15
     call rnd
     mov rbx, rax
+    call coin
+    test eax, eax
+    jz .cu1
+    emit "user: What is the volume of a cube with edges of "
+    nu rbx
+    emit "?", 10
+    jmp .cu2
+.cu1:
     emit "user: A cube has edges of "
     nu rbx
     emit ". What is its volume?", 10
+.cu2:
     emit "assistant: A cube's volume is edge × edge × edge.", 10
     mov rcx, rbx
     mov rdx, rbx
@@ -480,6 +617,18 @@ geo_vol:
     mov edx, 20
     call rnd
     mov r13, rax
+    call coin
+    test eax, eax
+    jz .bo1
+    emit "user: What is the volume of a box "
+    nu rbx
+    emit " by "
+    nu r12
+    emit " by "
+    nu r13
+    emit "?", 10
+    jmp .bo2
+.bo1:
     emit "user: A box is "
     nu rbx
     emit " long, "
@@ -487,6 +636,7 @@ geo_vol:
     emit " wide and "
     nu r13
     emit " tall. What is its volume?", 10
+.bo2:
     emit "assistant: Volume is length × width × height.", 10
     mov rcx, rbx
     mov rdx, r12
@@ -547,11 +697,22 @@ geo_pyth:
     call coin
     test eax, eax
     jnz .leg
+    call coin
+    test eax, eax
+    jz .hy1
+    emit "user: How long is the hypotenuse of a right triangle with legs of "
+    nu rbx
+    emit " and "
+    nu r12
+    emit "?", 10
+    jmp .hy2
+.hy1:
     emit "user: A right triangle has legs of "
     nu rbx
     emit " and "
     nu r12
     emit ". How long is the hypotenuse?", 10
+.hy2:
     emit "assistant: By Pythagoras, hypotenuse^2 = "
     num rbx
     emit "^2 + "

@@ -1,0 +1,268 @@
+# questions typed the way people type them, not the way mathgen writes them: no
+# spaces, lowercase, x and * for times, ², commas in numbers, missing units. the answer
+# is the last line mathgen would end on for the tidy version. bin\matheval file=math\messy.txt
+# scores them, but read the log too: the math can be right with the restated line off
+
+# mul
+user: whats 17 times 23
+assistant: 17 × 23 = 391
+
+# mul
+user: 345*12
+assistant: 345 × 12 = 4140
+
+# mul
+user: can u multiply 908 and 46
+assistant: 908 × 46 = 41768
+
+# mul
+user: what is 1,234 x 56?
+assistant: 1234 × 56 = 69104
+
+# div
+user: 1000 divided by 8
+assistant: 1000 ÷ 8 = 125
+
+# div
+user: what's 7,425 / 15
+assistant: 7425 ÷ 15 = 495
+
+# div
+user: how many times does 12 go into 1500
+assistant: 1500 ÷ 12 = 125
+
+# div
+user: divide 9999 by 7 please
+assistant: 9999 ÷ 7 = 1428 remainder 3
+
+# add
+user: 4567+8901
+assistant: 4567 + 8901 = 13468
+
+# add
+user: add up 25, 37 and 48
+assistant: 25 + 37 + 48 = 110
+
+# sub
+user: what is 10000 minus 1
+assistant: 10000 - 1 = 9999
+
+# sub
+user: 503-788
+assistant: 503 - 788 = -285
+
+# signed
+user: -8 * -7
+assistant: -8 × (-7) = 56
+
+# signed
+user: what's -15 + 6
+assistant: -15 + 6 = -9
+
+# frac
+user: 1/2 + 1/3
+assistant: 1/2 + 1/3 = 5/6
+
+# frac
+user: what is 3/4 times 2/5
+assistant: 3/4 × 2/5 = 3/10
+
+# frac
+user: simplify 18/24
+assistant: 18/24 = 3/4
+
+# percent
+user: whats 20 percent of 150
+assistant: 20% of 150 = 30
+
+# percent
+user: 15% of 80?
+assistant: 15% of 80 = 12
+
+# primes
+user: prime factors of 360
+assistant: 360 = 2^3 × 3^2 × 5
+
+# primes
+user: factorize 1001
+assistant: 1001 = 7 × 11 × 13
+
+# gcd
+user: gcd of 48 and 180
+assistant: gcd(48, 180) = 12
+
+# gcd
+user: lcm 12 and 18
+assistant: lcm(12, 18) = 36
+
+# power
+user: 2 to the power of 10
+assistant: 2^10 = 1024
+
+# power
+user: what is 5 squared
+assistant: 5^2 = 25
+
+# root
+user: square root of 144
+assistant: √144 = 12
+
+# root
+user: simplify sqrt(50)
+assistant: √50 = 5√2
+
+# linear
+user: solve 3x+5=20
+assistant: x = 5
+
+# linear
+user: 2x - 7 = 11, what is x
+assistant: x = 9
+
+# linear
+user: if 5y = 3y + 14 find y
+assistant: y = 7
+
+# quadratic
+user: factor x²+5x+6
+assistant: x^2 + 5x + 6 = (x + 2)(x + 3)
+
+# solve
+user: solve x^2 - 9 = 0
+assistant: x = 3 or x = -3
+
+# solve
+user: roots of x^2-7x+12=0
+assistant: x = 3 or x = 4
+
+# solve
+user: solve 2x^2 + 3x - 2 = 0
+assistant: x = 1/2 or x = -2
+
+# system
+user: solve x+y=10 and x-y=2
+assistant: x = 6, y = 4
+
+# system
+user: 2x + 3y = 12, x - y = 1
+assistant: x = 3, y = 2
+
+# expand
+user: expand (x+3)(x-2)
+assistant: (x + 3)(x - 2) = x^2 + x - 6
+
+# expand
+user: multiply out (2x-1)^2
+assistant: (2x - 1)^2 = 4x^2 - 4x + 1
+
+# order
+user: 2+3*4
+assistant: 2 + 3 × 4 = 14
+
+# order
+user: what is (8-3)*(2+4)
+assistant: (8 - 3) × (2 + 4) = 30
+
+# order
+user: 100 - 6^2 / 4
+assistant: 100 - 6^2 ÷ 4 = 91
+
+# decimal
+user: 2.5 * 4.2
+assistant: 2.5 × 4.2 = 10.5
+
+# decimal
+user: 0.1 + 0.2
+assistant: 0.1 + 0.2 = 0.3
+
+# decimal
+user: round 3.14159 to 2 decimals
+assistant: 3.14159 rounded to 2 decimal places is 3.14
+
+# decimal
+user: 3/8 as a decimal
+assistant: 3/8 = 0.375
+
+# stats
+user: average of 4, 8, 15, 16, 23, 42
+assistant: The mean is 18.
+
+# stats
+user: median of 3 1 4 1 5 9 2 6
+assistant: The median is 3.5.
+
+# geometry
+user: area of a circle with radius 5 cm
+assistant: Answer: 25π square cm
+
+# geometry
+user: right triangle with legs 5 cm and 12 cm, how long is the hypotenuse
+assistant: Answer: 13 cm
+
+# geometry
+user: whats the volume of a box 3 m by 4 m by 5 m
+assistant: Answer: 60 cubic m
+
+# geometry
+user: two angles in a triangle are 50 and 60 degrees, whats the third one
+assistant: Answer: 70 degrees
+
+# words
+user: I have 24 cookies and 6 friends. If I share them equally how many does each friend get?
+assistant: Answer: 4 cookies
+
+# words
+user: a pizza costs 12 dollars. how much for 5 pizzas?
+assistant: Answer: 60 dollars
+
+# words
+user: Tom is 12 and his dad is 3 times as old. how old is his dad
+assistant: Answer: 36 years old
+
+# sequence
+user: what is the 10th term of 2, 4, 6, 8, ...
+assistant: The 10th term is 20.
+
+# sequence
+user: 3, 6, 12, 24, ... whats the 8th term
+assistant: The 8th term is 384.
+
+# line
+user: slope between (1,2) and (3,8)
+assistant: The slope is 3.
+
+# inequality
+user: solve 2x + 3 > 11
+assistant: x > 4
+
+# abs
+user: |x - 5| = 3
+assistant: x = 8 or x = 2
+
+# exponent
+user: 2^x = 64
+assistant: x = 6
+
+# factor
+user: factor 6x^2 + 9x
+assistant: 6x^2 + 9x = 3x(2x + 3)
+
+# factor
+user: factor 4x^2 - 25
+assistant: 4x^2 - 25 = (2x - 5)(2x + 5)
+
+# polydiv
+user: (x^3 - 1) / (x - 1)
+assistant: (x^3 - 1) ÷ (x - 1) = x^2 + x + 1
+
+# evaluate
+user: if x = 3 what is 2x^2 + x - 5
+assistant: 2x^2 + x - 5 = 16 when x = 3
+
+# like
+user: simplify 3x + 2x - x + 4
+assistant: 3x + 2x - x + 4 = 4x + 4
+
+# ratio
+user: split 100 in the ratio 3:2
+assistant: 100 shared in the ratio 3:2 is 60 and 40

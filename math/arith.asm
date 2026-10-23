@@ -53,20 +53,24 @@ qg3 db "gcd(", 0
 qg4 db "Find the greatest common factor of ", 0
 ocomma db ", ", 0
 sbr    db ") = ?", 0
+qg5 db "gcd of ", 0
+qg6 db "What is the GCF of ", 0
 align 8
 qgcd dq qg0, oand, sq,  qg1, oand, sdot,  qg2, oand, sq,  qg3, ocomma, sbr
-     dq qg4, oand, sdot
-NQGCD equ 5
+     dq qg4, oand, sdot,  qg5, oand, empty,  qg6, oand, sq
+NQGCD equ 7
 ql0 db "What is the least common multiple of ", 0
 ql1 db "Find the LCM of ", 0
 ql2 db "What's the lowest common multiple of ", 0
 ql3 db "lcm(", 0
 ql4 db "What is the smallest number that both ", 0
 sgo db " go into?", 0
+ql5 db "lcm of ", 0
+ql6 db "What is the LCM of ", 0
 align 8
 qlcm dq ql0, oand, sq,  ql1, oand, sdot,  ql2, oand, sq,  ql3, ocomma, sbr
-     dq ql4, oand, sgo
-NQLCM equ 5
+     dq ql4, oand, sgo,  ql5, oand, empty,  ql6, oand, sq
+NQLCM equ 7
 
 qe0 db "Evaluate ", 0
 align 8
@@ -76,9 +80,16 @@ qr0 db "What is √", 0
 qr1 db "Simplify √", 0
 qr2 db "Find the square root of ", 0
 qr3 db "√", 0
+qr4 db "What is the square root of ", 0
+qr5 db "sqrt(", 0
+qr6 db "Simplify sqrt(", 0
+qr7 db "square root of ", 0
+sbr1 db ")", 0
+sbr2 db ").", 0
 align 8
 qroot dq qr0, sq,  qr1, sdot,  qr2, sdot,  qr3, seq
-NQROOT equ 4
+      dq qr4, sq,  qr5, sbr1,  qr6, sbr2,  qr7, empty
+NQROOT equ 8
 ; the square-free part under the root, 1 most often
 inside dq 1, 1, 1, 1, 1, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30
 NINSIDE equ 23
@@ -88,9 +99,11 @@ qp1 db "Find ", 0
 qp2 db "Work out ", 0
 qp3 db "Calculate ", 0
 pof db "% of ", 0
+pofw db " percent of ", 0
 align 8
 qpct dq qp0, pof, sq,  qp1, pof, sdot,  qp2, pof, sdot,  qp3, pof, sdot
-NQPCT equ 4
+     dq qp0, pofw, sq,  empty, pof, empty,  qp1, pofw, sdot
+NQPCT equ 7
 s_upby   db " increased by ", 0
 s_downby db " decreased by ", 0
 s_inc    db "Increase ", 0
@@ -1748,6 +1761,16 @@ pow_one:
     jnz .q
     mov r14d, 1
 .q:
+    test r14, r14               ; a third of the plain ones in words: 5 squared
+    jnz .qs
+    xor ecx, ecx
+    mov edx, 2
+    call rnd
+    test eax, eax
+    jnz .qs
+    call pword
+    jmp .qd
+.qs:
     lea rcx, [qpow]
     mov edx, NQPOW
     call askpre
@@ -1756,6 +1779,7 @@ pow_one:
     mov rcx, r15
     call emz
     emit 10
+.qd:
     emit "assistant: "
     cmp r12, 1
     ja .chain
@@ -2070,6 +2094,55 @@ root_one:
     pop r12
     pop rsi
     pop rbx
+    ret
+
+; pow_one's question in words, from rbx = b, r12 = n: "What is 5 squared?",
+; "2 to the power of 10", "Work out 3 cubed."
+pword:
+    push rsi
+    push r13
+    sub rsp, 40
+    xor ecx, ecx
+    mov edx, 2
+    call rnd
+    mov r13, rax
+    emit "user: "
+    test r13, r13
+    jnz .w1
+    emit "What is "
+    jmp .b
+.w1:
+    cmp r13, 2
+    jne .b
+    emit "Work out "
+.b:
+    num rbx
+    cmp r12, 2
+    jne .c
+    emit " squared"
+    jmp .e
+.c:
+    cmp r12, 3
+    jne .p
+    emit " cubed"
+    jmp .e
+.p:
+    emit " to the power of "
+    num r12
+.e:
+    test r13, r13
+    jnz .e1
+    emit "?"
+    jmp .e3
+.e1:
+    cmp r13, 2
+    jne .e3
+    emit "."
+.e3:
+    emit 10
+    add rsp, 40
+    pop r13
+    pop rsi
     ret
 
 ; ecx = 0: what comes out of root_one's factorization, multiplied up a line at a
