@@ -1,9 +1,11 @@
-; mathgen [n=1000] [seed=1] [out=datasets\math\arith.txt]: math problems worked out
+; mathgen [n=1000] [seed=1] [split=train|eval|all] [out=datasets\math\arith.txt]: math problems worked out
 ; step by step, as conversations in chatdocs' text format: long multiplication and
 ; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
 ; long division. every step gets a line of its own, so the numbers in it stay small
 ; (under 100 is one token) and the steps always look the same. the last line of an
-; answer is the answer, and a "# topic" line before each problem says what it is
+; answer is the answer, and a "# topic" line before each problem says what it is.
+; split: a hash of the worked answer puts 1 in 16 problems in eval, and train never
+; gets those, whatever the seed (the question's wording doesn't count)
 default rel
 bits 64
 %include "lib.inc"
@@ -16,6 +18,10 @@ section .rdata
 k_n      db "n", 0
 k_seed   db "seed", 0
 k_out    db "out", 0
+k_split  db "split", 0
+d_split  db "train", 0
+s_eval   db "eval", 0
+s_all    db "all", 0
 d_out    db "datasets\math\arith.txt", 0
 s_dir    db "datasets\math", 0
 e_open   db "can't create the output", 0
@@ -109,6 +115,7 @@ buf      resq 1
 fh       resq 1
 outp     resq 1
 nprob    resq 1
+split    resq 1                 ; 0 train, 1 eval, 2 all
 na       resq 1
 nb       resq 1
 nq       resq 1
@@ -165,7 +172,7 @@ section .text
 
 global start
 start:
-    sub rsp, 40
+    sub rsp, 56
     call lib_init
     call cfg_args
     lea rcx, [k_n]
@@ -182,6 +189,19 @@ start:
     lea rdx, [d_out]
     call cfg_str
     mov [outp], rax
+    lea rcx, [k_split]
+    lea rdx, [d_split]
+    call cfg_str
+    mov rbx, rax
+    mov rcx, rax
+    lea rdx, [s_eval]
+    call streq
+    mov [split], rax
+    mov rcx, rbx
+    lea rdx, [s_all]
+    call streq
+    add rax, rax
+    add [split], rax
     lea rcx, [s_dir]
     call make_dir
     mov rcx, [outp]
@@ -206,12 +226,20 @@ start:
     mov edx, NTOPIC - 1
     call rnd
     mov [rsp+32], rax
+    mov [rsp+40], rdi           ; where this one starts
     lea rcx, [tname]
     mov rcx, [rcx+rax*8]
     call emz
     mov rax, [rsp+32]
     lea rcx, [topics]
     call [rcx+rax*8]
+    mov rcx, [rsp+40]
+    call keep
+    test eax, eax
+    jnz .kept
+    mov rdi, [rsp+40]           ; the other split's: take it back
+    jmp .p
+.kept:
     emit 10
     inc rbx
     mov rax, rdi
@@ -233,6 +261,62 @@ start:
     say 13, 10
     xor ecx, ecx
     call ExitProcess
+
+; rcx, rdx = zero-terminated strings. eax = 1 if they're the same
+streq:
+    mov al, [rcx]
+    cmp al, [rdx]
+    jne .no
+    test al, al
+    jz .yes
+    inc rcx
+    inc rdx
+    jmp streq
+.yes:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; rcx = where the problem just written starts. eax = 1 if it belongs to this split:
+; fnv-1a of the answer, from "assistant: " on, and 1 bucket in 16 is eval's
+keep:
+    cmp qword [split], 2
+    je .yes
+.find:
+    cmp rcx, rdi
+    jae .yes                    ; (always has one)
+    cmp byte [rcx], 10
+    jne .f
+    cmp byte [rcx+1], 'a'
+    je .hash
+.f:
+    inc rcx
+    jmp .find
+.hash:
+    mov rax, 0xcbf29ce484222325
+    mov r8, 0x100000001b3
+.h:
+    cmp rcx, rdi
+    jae .bucket
+    movzx edx, byte [rcx]
+    xor rax, rdx
+    imul rax, r8
+    inc rcx
+    jmp .h
+.bucket:
+    shr rax, 60                 ; the top 4 bits
+    xor edx, edx
+    test rax, rax
+    sete dl                     ; 1 = eval's
+    xor eax, eax
+    cmp rdx, [split]
+    sete al
+    ret
+.yes:
+    mov eax, 1
+    ret
 
 ; [buf, rdi) to the file, rdi back to the start
 flush:
