@@ -1,14 +1,17 @@
 ; mathgen [n=1000] [seed=1] [split=train|eval|all] [out=datasets\math\arith.txt]: math problems worked out
 ; step by step, as conversations in chatdocs' text format: long multiplication and
 ; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
-; long division. every step gets a line of its own, so the numbers in it stay small
+; long division here, the rest of arithmetic in arith.asm and more algebra in
+; algebra.asm. every step gets a line of its own, so the numbers in it stay small
 ; (under 100 is one token) and the steps always look the same. the last line of an
 ; answer is the answer, and a "# topic" line before each problem says what it is.
 ; split: a hash of the worked answer puts 1 in 16 problems in eval, and train never
 ; gets those, whatever the seed (the question's wording doesn't count)
+; uses: math\arith math\algebra
 default rel
 bits 64
 %include "lib.inc"
+%include "math/math.inc"
 
 extern ExitProcess
 
@@ -99,14 +102,36 @@ letters db "xynt"
 
 align 8
 topics dq mul_one, div_one, factor_one, lin_one, quad_one, pdiv_one
-tname  dq tn0, tn1, tn2, tn3, tn4, tn5
-NTOPIC equ 6
+       dq add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
+       dq order_one, word_one, sys_one, expand_one, like_one, evalp_one, qeq_one
+tname  dq tn0, tn1, tn2, tn3, tn4, tn5, tn6, tn7, tn8, tn9, tn10, tn11, tn12, tn13
+       dq tn14, tn15, tn16, tn17, tn18, tn19, tn20
+NTOPIC equ 21
+; how often each comes up, out of TWSUM. the ones with only a few hundred different
+; problems in them (powers, roots, factoring) get less
+tw     db 7, 7, 5, 6, 3, 5, 4, 4, 5, 5, 7, 3, 3, 5, 6, 7, 5, 5, 4, 4, 5
+TWSUM  equ 105
 tn0 db "# mul", 10, 0
 tn1 db "# div", 10, 0
 tn2 db "# primes", 10, 0
 tn3 db "# linear", 10, 0
 tn4 db "# quadratic", 10, 0
 tn5 db "# polydiv", 10, 0
+tn6 db "# add", 10, 0
+tn7 db "# sub", 10, 0
+tn8 db "# signed", 10, 0
+tn9 db "# gcd", 10, 0
+tn10 db "# frac", 10, 0
+tn11 db "# power", 10, 0
+tn12 db "# root", 10, 0
+tn13 db "# percent", 10, 0
+tn14 db "# order", 10, 0
+tn15 db "# words", 10, 0
+tn16 db "# system", 10, 0
+tn17 db "# expand", 10, 0
+tn18 db "# like", 10, 0
+tn19 db "# evaluate", 10, 0
+tn20 db "# solve", 10, 0
 
 section .bss
 alignb 8
@@ -135,40 +160,9 @@ letter   resb 1                 ; the variable
 
 section .text
 
-; the number in %1 at rdi
-%macro num 1
-    mov rdx, %1
-    mov rcx, rdi
-    call fmt_dec
-    mov rdi, rax
-%endmacro
-
-; the same, signed
-%macro sint 1
-    mov rdx, %1
-    mov rcx, rdi
-    call fmt_int
-    mov rdi, rax
-%endmacro
-
-; signed, in brackets if it's negative: 3 × (-5)
-%macro pint 1
-    mov rdx, %1
-    test rdx, rdx
-    jns %%pos
-    mov byte [rdi], '('
-    inc rdi
-    mov rcx, rdi
-    call fmt_int
-    mov byte [rax], ')'
-    lea rdi, [rax+1]
-    jmp %%done
-%%pos:
-    mov rcx, rdi
-    call fmt_dec
-    mov rdi, rax
-%%done:
-%endmacro
+global rnd, ndig, digits, emz, ask, askpre, askpre3, letr, mono, pmono, sterm, poly, lin
+global mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom
+global letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
 
 global start
 start:
@@ -223,8 +217,18 @@ start:
     cmp rbx, [nprob]
     jae .done
     xor ecx, ecx
-    mov edx, NTOPIC - 1
+    mov edx, TWSUM - 1
     call rnd
+    lea rcx, [tw]
+    xor edx, edx
+.w:
+    movzx r8d, byte [rcx+rdx]
+    sub rax, r8
+    jb .wd
+    inc edx
+    jmp .w
+.wd:
+    mov eax, edx
     mov [rsp+32], rax
     mov [rsp+40], rdi           ; where this one starts
     lea rcx, [tname]
@@ -429,10 +433,7 @@ mul_one:
     push rbx
     push rsi
     push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 56
+    sub rsp, 32
     mov ecx, 2
     mov edx, 5
     call rnd
@@ -450,7 +451,27 @@ mul_one:
     mov r8, rbx
     mov r9, r12
     call ask
+    emit "assistant: "
     mov rcx, rbx
+    mov rdx, r12
+    call mulwork
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a, rdx = b: long multiplication, down to "a × b = p". rax = p
+mulwork:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    mov rbx, rcx
+    mov r12, rdx
     lea rdx, [adig]
     call digits
     mov [na], rax
@@ -458,7 +479,7 @@ mul_one:
     lea rdx, [bdig]
     call digits
     mov [nb], rax
-    emit "assistant: Multiply "
+    emit "Multiply "
     num rbx
     cmp qword [nb], 1
     jne .many
@@ -552,6 +573,8 @@ mul_one:
     imul rax, r12
     num rax
     emit 10
+    mov rax, rbx
+    imul rax, r12
     add rsp, 56
     pop r15
     pop r14
@@ -711,10 +734,7 @@ div_one:
     push rbx
     push rsi
     push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 40
+    sub rsp, 32
     xor ecx, ecx
     mov edx, 1
     call rnd
@@ -739,6 +759,27 @@ div_one:
     mov r9, r12
     call ask
     emit "assistant: "
+    mov rcx, rbx
+    mov rdx, r12
+    call divwork
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = a, rdx = b (under 100): long division, down to "a ÷ b = q remainder r".
+; rax = q, rdx = r
+divwork:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+    mov rbx, rcx
+    mov r12, rdx
     cmp rbx, r12
     jae .long
     num rbx
@@ -836,6 +877,9 @@ div_one:
     num [rsp+32]
 .exact:
     emit 10
+    mov rax, rbx
+    xor edx, edx
+    div r12
     add rsp, 40
     pop r15
     pop r14
@@ -1123,8 +1167,7 @@ factor_one:
     push r12
     push r13
     push r14
-    push r15
-    sub rsp, 56
+    sub rsp, 32
     mov r12d, 1
     mov ecx, 2
     mov edx, 5
@@ -1176,6 +1219,26 @@ factor_one:
     call emz
     emit 10
     emit "assistant: Divide by the smallest prime that goes in, again and again.", 10
+    mov rcx, r12
+    call factwork
+    add rsp, 32
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = n: trial division down to "n = 2^3 × 3^2 × 5", the primes in fp/fe/nf
+factwork:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    mov r12, rcx
     mov r13, r12                ; what's left
     xor r14d, r14d              ; which prime
     mov qword [nf], 0
@@ -1512,8 +1575,7 @@ quad_one:
     push r12
     push r13
     push r14
-    push r15
-    sub rsp, 72
+    sub rsp, 48
     mov byte [letter], 'x'
 .p:
     mov rcx, -12
@@ -1540,7 +1602,31 @@ quad_one:
     mov rcx, [rsp+32]
     call emz
     emit 10
-    emit "assistant: Find two numbers that multiply to "
+    emit "assistant: "
+    mov rcx, r13
+    mov rdx, r14
+    call quadwork
+    add rsp, 48
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = b, rdx = c: x^2 + bx + c factored by trying the factor pairs of c, down to
+; "x^2 + bx + c = (x + u)(x + v)". rax = u, rdx = v
+quadwork:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    mov r13, rcx
+    mov r14, rdx
+    emit "Find two numbers that multiply to "
     sint r14
     emit " and add to "
     sint r13
@@ -1625,6 +1711,8 @@ quad_one:
     mov rdx, [rsp+56]
     call twobin
     emit 10
+    mov rax, [rsp+48]
+    mov rdx, [rsp+56]
     add rsp, 72
     pop r15
     pop r14
