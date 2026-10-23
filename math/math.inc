@@ -14,6 +14,9 @@ extern order_one, word_one
 extern sys_one, expand_one, like_one, evalp_one, qeq_one
 ; decimal.asm
 extern dec_one, stats_one, ratio_one, pdec, pdecs
+; geometry.asm, algebra2.asm
+extern geo_one
+extern ineq_one, seq_one, line_one, fac2_one, abs_one, expeq_one
 
 ; the number in %1 at rdi
 %macro num 1

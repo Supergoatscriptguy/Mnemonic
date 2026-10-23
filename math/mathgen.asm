@@ -7,7 +7,7 @@
 ; answer is the answer, and a "# topic" line before each problem says what it is.
 ; split: a hash of the worked answer puts 1 in 16 problems in eval, and train never
 ; gets those, whatever the seed (the question's wording doesn't count)
-; uses: math\arith math\algebra math\decimal
+; uses: math\arith math\algebra math\decimal math\geometry math\algebra2
 default rel
 bits 64
 %include "lib.inc"
@@ -105,13 +105,16 @@ topics dq mul_one, div_one, factor_one, lin_one, quad_one, pdiv_one
        dq add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
        dq order_one, word_one, sys_one, expand_one, like_one, evalp_one, qeq_one
        dq dec_one, stats_one, ratio_one
+       dq geo_one, ineq_one, seq_one, line_one, fac2_one, abs_one, expeq_one
 tname  dq tn0, tn1, tn2, tn3, tn4, tn5, tn6, tn7, tn8, tn9, tn10, tn11, tn12, tn13
        dq tn14, tn15, tn16, tn17, tn18, tn19, tn20, tn21, tn22, tn23
-NTOPIC equ 24
+       dq tn24, tn25, tn26, tn27, tn28, tn29, tn30
+NTOPIC equ 31
 ; how often each comes up, out of TWSUM. the ones with only a few hundred different
 ; problems in them (powers, roots, factoring) get less
 tw     db 7, 7, 5, 6, 3, 5, 4, 4, 5, 5, 7, 3, 3, 5, 6, 7, 5, 5, 4, 4, 5, 7, 4, 4
-TWSUM  equ 120
+       db 6, 4, 4, 4, 5, 3, 3
+TWSUM  equ 149
 tn0 db "# mul", 10, 0
 tn1 db "# div", 10, 0
 tn2 db "# primes", 10, 0
@@ -136,6 +139,13 @@ tn20 db "# solve", 10, 0
 tn21 db "# decimal", 10, 0
 tn22 db "# stats", 10, 0
 tn23 db "# ratio", 10, 0
+tn24 db "# geometry", 10, 0
+tn25 db "# inequality", 10, 0
+tn26 db "# sequence", 10, 0
+tn27 db "# line", 10, 0
+tn28 db "# factor", 10, 0
+tn29 db "# abs", 10, 0
+tn30 db "# exponent", 10, 0
 
 section .bss
 alignb 8
