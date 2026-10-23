@@ -11,7 +11,7 @@ bits 64
 
 extern ExitProcess
 
-MAXMSG equ 1 << 16
+MAXMSG equ 1 << 22            ; messages in one file (mathgen's sets have millions)
 
 section .rdata
 k_user   db "user:"
