@@ -7,11 +7,13 @@ extern mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom
 extern letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
 ; arith.asm
 extern mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
-extern sadd, coin
+extern sadd, coin, upto
 extern add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
 extern order_one, word_one
 ; algebra.asm
 extern sys_one, expand_one, like_one, evalp_one, qeq_one
+; decimal.asm
+extern dec_one, stats_one, ratio_one, pdec, pdecs
 
 ; the number in %1 at rdi
 %macro num 1

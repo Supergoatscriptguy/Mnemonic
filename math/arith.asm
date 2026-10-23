@@ -295,7 +295,7 @@ section .text
 
 global mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
 global add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
-global order_one, word_one, sadd, coin
+global order_one, word_one, sadd, coin, upto
 
 ; ---- steps
 

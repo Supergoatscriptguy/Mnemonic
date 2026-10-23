@@ -1,5 +1,5 @@
 ; matheval [model=models\mnemonic-300m-q8.mnm] [file=datasets\math\eval.txt] [n=0]
-;   [max=1000] [threads=...] [log=logs\matheval.txt]
+;   [max=2000] [threads=...] [log=logs\matheval.txt]
 ; asks the model every problem in a mathgen file (greedy, on the cpu, like bin\chat
 ; temp=0) and checks the last line of its reply against the right one, exactly. a
 ; score per topic at the end, and every reply in the log to read through. n=0: all
@@ -107,7 +107,7 @@ start:
     xorpd xmm0, xmm0
     movsd [samp_temp], xmm0     ; greedy
     lea rcx, [k_max]
-    mov edx, 1000
+    mov edx, 2000
     call cfg_int
     mov [maxgen], rax
     lea rcx, [k_n]

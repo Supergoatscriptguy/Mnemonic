@@ -7,7 +7,7 @@
 ; answer is the answer, and a "# topic" line before each problem says what it is.
 ; split: a hash of the worked answer puts 1 in 16 problems in eval, and train never
 ; gets those, whatever the seed (the question's wording doesn't count)
-; uses: math\arith math\algebra
+; uses: math\arith math\algebra math\decimal
 default rel
 bits 64
 %include "lib.inc"
@@ -104,13 +104,14 @@ align 8
 topics dq mul_one, div_one, factor_one, lin_one, quad_one, pdiv_one
        dq add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
        dq order_one, word_one, sys_one, expand_one, like_one, evalp_one, qeq_one
+       dq dec_one, stats_one, ratio_one
 tname  dq tn0, tn1, tn2, tn3, tn4, tn5, tn6, tn7, tn8, tn9, tn10, tn11, tn12, tn13
-       dq tn14, tn15, tn16, tn17, tn18, tn19, tn20
-NTOPIC equ 21
+       dq tn14, tn15, tn16, tn17, tn18, tn19, tn20, tn21, tn22, tn23
+NTOPIC equ 24
 ; how often each comes up, out of TWSUM. the ones with only a few hundred different
 ; problems in them (powers, roots, factoring) get less
-tw     db 7, 7, 5, 6, 3, 5, 4, 4, 5, 5, 7, 3, 3, 5, 6, 7, 5, 5, 4, 4, 5
-TWSUM  equ 105
+tw     db 7, 7, 5, 6, 3, 5, 4, 4, 5, 5, 7, 3, 3, 5, 6, 7, 5, 5, 4, 4, 5, 7, 4, 4
+TWSUM  equ 120
 tn0 db "# mul", 10, 0
 tn1 db "# div", 10, 0
 tn2 db "# primes", 10, 0
@@ -132,6 +133,9 @@ tn17 db "# expand", 10, 0
 tn18 db "# like", 10, 0
 tn19 db "# evaluate", 10, 0
 tn20 db "# solve", 10, 0
+tn21 db "# decimal", 10, 0
+tn22 db "# stats", 10, 0
+tn23 db "# ratio", 10, 0
 
 section .bss
 alignb 8
@@ -148,6 +152,7 @@ rows     resq 4
 adig     resb 24                ; digits, the ones first
 bdig     resb 24
 qdig     resb 24
+sdig     resb 24
 primes   resq 168               ; the ones under 1000
 nprimes  resq 1
 nf       resq 1                 ; a factorization: its primes and their powers
@@ -1273,8 +1278,19 @@ factwork:
     num r13
     emit " ÷ "
     num r15
+    cmp r13, 99
+    ja .short
     emit " = "
     num [rsp+32]
+    jmp .rem
+.short:
+    emit ": "                   ; too big to just know, so short division
+    mov rcx, r13
+    mov rdx, r15
+    call sdiv
+    emit ", so "
+    num [rsp+32]
+.rem:
     cmp qword [rsp+40], 0
     jne .no
     emit 10
@@ -1314,6 +1330,62 @@ factwork:
 .end:
     emit 10
     add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = n, rdx = d: short division, a digit at a time with what's left carried on,
+; "6887 ÷ 13" -> "68 ÷ 13 = 5 r 3, 38 ÷ 13 = 2 r 12, 127 ÷ 13 = 9 r 10"
+sdiv:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+    mov r12, rcx
+    mov r13, rdx
+    lea rdx, [sdig]
+    call digits
+    mov r14, rax
+    xor r15d, r15d              ; what's being divided
+    xor ebx, ebx                ; steps so far
+.l:
+    dec r14
+    js .r
+    lea rax, [sdig]
+    movzx eax, byte [rax+r14]
+    imul r15, r15, 10
+    add r15, rax
+    test rbx, rbx
+    jnz .step
+    cmp r15, r13
+    jb .l                       ; not enough yet: take another digit
+.step:
+    test rbx, rbx
+    jz .first
+    emit ", "
+.first:
+    inc rbx
+    num r15
+    emit " ÷ "
+    num r13
+    emit " = "
+    mov rax, r15
+    xor edx, edx
+    div r13
+    mov r15, rdx
+    num rax
+    emit " r "
+    num r15
+    jmp .l
+.r:
+    add rsp, 40
     pop r15
     pop r14
     pop r13
