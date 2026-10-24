@@ -1512,7 +1512,39 @@ factwork:
     num [rsp+32]
     emit " is more than "
     num r13
-    emit ".", 10
+    emit "."
+    ; say the last prime's count here, it's easy to lose by the final line
+    mov rax, [nf]
+    test rax, rax
+    jz .pe
+    lea rcx, [fp]
+    cmp [rcx+rax*8-8], r15
+    jne .pe
+    lea rcx, [fe]
+    mov rcx, [rcx+rax*8-8]
+    mov [rsp+40], rcx
+    cmp r13, r15
+    jne .pb
+    emit " That's one more "
+    num r15
+    emit ", so "
+    num r15
+    emit "^"
+    mov rax, [rsp+40]
+    inc rax
+    num rax
+    emit " in all."
+    jmp .pe
+.pb:
+    emit " So "
+    num r15
+    emit "^"
+    num [rsp+40]
+    emit " in all, and "
+    num r13
+    emit " once."
+.pe:
+    emit 10
     mov rcx, r13
     call addfac
     jmp .all
@@ -1554,7 +1586,22 @@ factwork:
 .no:
     emit " remainder "
     num [rsp+40]
-    emit ", no", 10
+    emit ", no"
+    mov rax, [nf]               ; and if this prime went in, how many times
+    test rax, rax
+    jz .ne
+    lea rcx, [fp]
+    cmp [rcx+rax*8-8], r15
+    jne .ne
+    emit ", so "
+    num r15
+    emit "^"
+    mov rax, [nf]
+    lea rcx, [fe]
+    num [rcx+rax*8-8]
+    emit " in all"
+.ne:
+    emit 10
     inc r14
     jmp .l
 .all:
