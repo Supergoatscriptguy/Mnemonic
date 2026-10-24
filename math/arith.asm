@@ -2064,10 +2064,28 @@ root_one:
     push r15
     sub rsp, 56
 .pick:
+    xor ecx, ecx                ; one in 4 has a long run of 2s, up to 2^13
+    mov edx, 3
+    call rnd
+    test eax, eax
+    jnz .s
+    mov ecx, 3
+    mov edx, 6
+    call rnd
+    mov ecx, eax
+    mov ebx, 1
+    shl rbx, cl
+    call coin
+    test eax, eax
+    jz .t
+    imul rbx, rbx, 3
+    jmp .t
+.s:
     mov ecx, 1
     mov edx, 30
     call rnd
     mov rbx, rax                ; s
+.t:
     xor ecx, ecx
     mov edx, NINSIDE - 1
     call rnd

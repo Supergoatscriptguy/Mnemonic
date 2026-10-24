@@ -1421,6 +1421,29 @@ factor_one:
     push r14
     sub rsp, 32
     mov r12d, 1
+    xor ecx, ecx                ; one in 4 starts on a long run of 2s (or 3s): 2^9 and
+    mov edx, 3                  ; up hardly ever came up, and that's where it lost count
+    call rnd
+    test eax, eax
+    jnz .cnt
+    xor ecx, ecx
+    mov edx, 3
+    call rnd
+    mov ebx, 2
+    mov edx, 13
+    test eax, eax
+    jnz .run
+    mov ebx, 3
+    mov edx, 9
+.run:
+    mov ecx, 3
+    call rnd
+    mov rcx, rax
+.rp:
+    imul r12, rbx
+    dec rcx
+    jnz .rp
+.cnt:
     mov ecx, 2
     mov edx, 5
     call rnd

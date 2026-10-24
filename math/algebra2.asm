@@ -575,10 +575,19 @@ line_one:
     call rnd
     mov r14, rax                ; y2
     emit "user: "
-    call coin
+    xor ecx, ecx
+    mov edx, 2
+    call rnd
     test eax, eax
     jz .s2
+    cmp eax, 1
+    je .s3
     emit "What is the slope of the line through "
+    call pts
+    emit "?", 10
+    jmp .sa
+.s3:
+    emit "Slope between "
     call pts
     emit "?", 10
     jmp .sa
