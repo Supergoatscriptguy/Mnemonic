@@ -1,5 +1,8 @@
 // checks the webassembly engine against the x86 one (bin\chat).
 //   node site\test.mjs [model=models\mnemonic-q8.mnm] [rows=1] [threads=all] [docs=2000] [tol=5e-4]
+//     [val=datasets\chat\val2048.tok] [q="Hi! Who are you?"] [max=60]
+// a math model wants val=datasets\math\valpack6.tok: on chat text its loss is ~11.6, and
+// the engines' int8 rounding drifts further apart up there
 // tol is how far the two losses may be apart. int4 needs more: the engines' int4 math
 // lands ~8e-4 apart on the 126M, against ~1e-5 for int8
 // the wasm runs exactly as on the page: one driver, helpers in worker threads,
@@ -113,8 +116,8 @@ const threads = e.set_threads(want)
 {
   const rows = +arg('rows', 1)
   const T = e.eng_get(7)
-  const vname = T === 1024 ? 'val.tok' : `val${T}.tok`
-  const vf = readFileSync(path(`datasets/chat/${vname}`))
+  const vname = arg('val', `datasets\\chat\\${T === 1024 ? 'val.tok' : `val${T}.tok`}`)
+  const vf = readFileSync(path(vname.replace(/\\/g, '/')))
   const tv = new Uint16Array(vf.buffer, vf.byteOffset + 64, (vf.length - 64) >> 1)
   let sum = 0, cnt = 0
   const t0 = performance.now()
@@ -127,7 +130,7 @@ const threads = e.set_threads(want)
     }
   }
   const secs = (performance.now() - t0) / 1000
-  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, `eval=datasets\\chat\\${vname}`, `rows=${rows}`], { cwd: root }).toString()
+  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, `eval=${vname}`, `rows=${rows}`], { cwd: root }).toString()
   const m = out.match(/loss ([\d.]+) over (\d+) targets, ([\d.]+) tok\/s/)
   const loss = sum / cnt
   check(m && +m[2] === cnt && Math.abs(loss - +m[1]) < +arg('tol', 5e-4),
@@ -137,21 +140,23 @@ const threads = e.set_threads(want)
 
 // greedy reply, same as bin\chat temp=0
 {
-  const q = 'Hi! Who are you?'
+  const q = arg('q', 'Hi! Who are you?')
+  const max = +arg('max', 60)
   e.eng_reset()
   const prompt = [32752, 32753, ...encode(q), 32756, 32754]
   prompt.forEach((t, i) => e.eng_step(t, i === prompt.length - 1 ? 1 : 0))
   const parts = []
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < max; i++) {
     const t = e.samp_pick(0, 0.9, 0.5)
     if (t >= 32752) break
     parts.push(...bytes(t))
     e.eng_step(t, 1)
   }
   const reply = new TextDecoder().decode(new Uint8Array(parts))
-  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, 'temp=0', 'max=60'], { cwd: root, input: q + '\n' }).toString()
+  const out = execFileSync(path('bin/chat.exe'), [`model=${model}`, 'temp=0', `max=${max}`], { cwd: root, input: q + '\n' }).toString()
   const m = out.match(/\x1b\[0m {2}(.*?)\r\n\x1b\[90m/s)
-  check(m && m[1] === reply, `greedy "${q}" -> "${reply}"` + (m && m[1] !== reply ? `, bin\\chat: "${m[1]}"` : ''))
+  const said = m && m[1].replace(/\r\n/g, '\n')
+  check(said === reply, `greedy "${q}" -> "${reply}"` + (m && said !== reply ? `, bin\\chat: "${said}"` : ''))
 }
 
 console.log(bad ? '  SOME CHECKS FAILED' : '  all passed')

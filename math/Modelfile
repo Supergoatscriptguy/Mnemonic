@@ -1,0 +1,4 @@
+TEMPLATE """{{- range .Messages }}<|{{ .Role }}|>{{ .Content }}<|end|>{{ end }}<|assistant|>"""
+PARAMETER stop <|end|>
+PARAMETER temperature 0
+PARAMETER repeat_penalty 1

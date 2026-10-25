@@ -23,8 +23,37 @@ nvcuda.dll, which comes with the NVIDIA driver. I trained it on one RTX 5070 Ti 
 
 All three are Llama-style (RoPE, RMSNorm, SwiGLU, grouped-query attention, tied embeddings) with a 32,768-token
 vocabulary, and all three were fine-tuned for chat on smol-smoltalk plus a small set of conversations about who the
-model is. They're small models: they write fluently, get facts wrong often, and can't do arithmetic. Each one is
-noticeably better than the one before.
+model is. They're small models: they write fluently, get facts wrong often, and can't do arithmetic (the math model
+below can). Each one is noticeably better than the one before.
+
+## Mnemonic Math
+
+A separate model that only does math: the 300M, fine-tuned on about 15 million problems that `bin\mathgen` writes and
+works out. There are 31 kinds: adding, subtracting and multiplying in columns, long division, signed numbers,
+fractions, decimals, percents, ratios, powers, square roots, prime factorization, gcd and lcm, order of operations,
+linear and quadratic equations, systems of two, inequalities, absolute value, like terms, expanding, factoring,
+polynomial division, evaluating, exponent equations, lines through two points, sequences, mean, median and mode,
+area, volume and angles, and word problems. Every step in a worked answer is one you'd just know, like a times table
+fact, a sum under 100 or one digit of a long division. Anything bigger is worked out on the page, so the model never
+has to guess a big result in one go.
+
+On 3,085 problems it never saw, it gets 99.7% right, and the 9 it misses are about wording, not wrong math. It also
+gets all 66 questions in `math\messy.txt`, which are typed the way people type ("whats 17 times 23", "solve 3x+5=20",
+"factor x²+5x+6"). But it only knows those 31 kinds. Ask it for a derivative or a probability and it answers anyway,
+wrongly.
+
+```
+curl.exe -L -o models\mnemonic-math-q8.mnm https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-math-q8.mnm
+.\bin\chat model=models\mnemonic-math-q8.mnm temp=0 max=2000
+```
+
+`mnemonic-math-q4.mnm` is the int4 version, 181 MB instead of 291, and it scores the same on all of the above.
+It's in the site's demo too. It isn't on Ollama yet: llama.cpp splits numbers into tokens 3 digits at a time and my
+tokenizer does 2, so there it misreads any number with 3 or more digits.
+
+Training it took 3 billion tokens over about 26 hours: `bin\train math`, then the polish runs `math2` to `math5`
+(`train\math*.cfg`), each one fixing what the last one's misses showed. `bin\matheval` scores a model on a file of
+held-out problems, topic by topic.
 
 ## What's in here
 
@@ -37,11 +66,12 @@ noticeably better than the one before.
 | `model` | The transformer: parameter layout, forward and backward passes as kernel launches, and the PTX for norms, attention and the rest |
 | `train` | The trainer (checkpoints, resuming, the progress bar, logs), chat data packing, a profiler |
 | `chat` | int8 and int4 quantization, the CPU inference engine (AVX2 and AVX-VNNI), the console chat, GGUF export for Ollama |
+| `math` | The math model's data: 31 kinds of worked problems, the noise that makes questions look typed, and the scorer |
 | `site` | The WebAssembly engine behind the browser demo |
 | `test` | Self-checking tests for all of the above |
 | `asmdata` | Tools for a NASM fine-tuning set, on hold for now |
 
-It comes to about 40,500 lines of NASM, 5,300 lines of PTX and 1,300 lines of WebAssembly text.
+It comes to about 55,000 lines of NASM, 5,400 lines of PTX and 1,300 lines of WebAssembly text.
 
 ## Building
 
