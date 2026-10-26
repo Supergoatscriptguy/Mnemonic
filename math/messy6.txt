@@ -1,0 +1,174 @@
+# the newer topics typed the way people type them, like messy.txt. the answer is the
+# last line mathgen would end on for the tidy version. bin\matheval file=math\messy6.txt
+
+# units
+user: how many minutes is 2.5 hours
+assistant: 2.5 hours = 150 minutes
+
+# units
+user: convert 5 km to m
+assistant: 5 kilometers = 5000 meters
+
+# units
+user: how many inches in 3 feet
+assistant: 3 feet = 36 inches
+
+# units
+user: 72 hours in days?
+assistant: 72 hours = 3 days
+
+# units
+user: 2.5kg to grams
+assistant: 2.5 kilograms = 2500 grams
+
+# units
+user: how many oz in 3 lb
+assistant: 3 pounds = 48 ounces
+
+# units
+user: 450 ml in liters
+assistant: 450 milliliters = 0.45 liters
+
+# money
+user: What is 15% off $80?
+assistant: Answer: $68
+
+# money
+user: whats a 20% tip on $45
+assistant: Answer: $9
+
+# money
+user: 8% tax on $25
+assistant: Answer: $2
+
+# money
+user: how much is $60 after 25% off
+assistant: Answer: $45
+
+# money
+user: something costs $13.45 and i pay with $20, how much change
+assistant: Answer: $6.55
+
+# money
+user: 5 notebooks at $2.35 each
+assistant: Answer: $11.75
+
+# money
+user: a jacket is $48 after 20% off. what was the original price
+assistant: Answer: $60
+
+# money
+user: simple interest on $500 at 4% for 3 years
+assistant: Answer: $60
+
+# change
+user: percent increase from 80 to 92
+assistant: The percent increase is 15%.
+
+# change
+user: what's the percent decrease from 250 to 200
+assistant: The percent decrease is 20%.
+
+# change
+user: 40 is 25% of what
+assistant: The number is 160.
+
+# change
+user: after a 20% increase a price is 96. what was it before
+assistant: Before, it was 80.
+
+# probability
+user: If I roll a die, what's the chance of getting a 6?
+assistant: The probability is 1/6.
+
+# probability
+user: probability of rolling an even number on a die
+assistant: The probability is 1/2.
+
+# probability
+user: chance of getting heads 2 times in a row
+assistant: The probability is 1/4.
+
+# probability
+user: a bag has 3 red and 5 blue marbles, whats the probability of picking a red one
+assistant: The probability is 3/8.
+
+# probability
+user: probability of drawing a king from a 52 card deck
+assistant: The probability is 1/13.
+
+# probability
+user: roll two dice, whats the probability the sum is 7
+assistant: The probability is 1/6.
+
+# probability
+user: flip a coin 3 times, probability of at least one head
+assistant: The probability is 7/8.
+
+# square
+user: solve x^2 = 49
+assistant: x = 7 or x = -7
+
+# square
+user: x²=144
+assistant: x = 12 or x = -12
+
+# square
+user: solve x^2 = 50
+assistant: x = 5√2 or x = -5√2
+
+# square
+user: 2x^2 = 72
+assistant: x = 6 or x = -6
+
+# square
+user: x^2-9=16
+assistant: x = 5 or x = -5
+
+# square
+user: (x+2)^2 = 25
+assistant: x = 3 or x = -7
+
+# log
+user: log base 2 of 32
+assistant: log_2(32) = 5
+
+# log
+user: log2(1024)
+assistant: log_2(1024) = 10
+
+# log
+user: what is log 1000
+assistant: log(1000) = 3
+
+# log
+user: log_3 81
+assistant: log_3(81) = 4
+
+# log
+user: solve log_2(x) = 5
+assistant: x = 32
+
+# log
+user: log_4(8)?
+assistant: log_4(8) = 3/2
+
+# derivative
+user: what is the derivative of x^3 + 2x
+assistant: The derivative is 3x^2 + 2.
+
+# derivative
+user: differentiate 3x^2 - 5x + 7
+assistant: The derivative is 6x - 5.
+
+# derivative
+user: f(x)=2x^3-x, what is f'(x)
+assistant: f'(x) = 6x^2 - 1
+
+# derivative
+user: slope of the tangent to y = x^2 + 3x at x = 2
+assistant: The slope is 7.
+
+# derivative
+user: second derivative of x^4 - 3x^2
+assistant: The second derivative is 12x^2 - 6.
