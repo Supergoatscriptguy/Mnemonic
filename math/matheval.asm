@@ -13,7 +13,7 @@ bits 64
 extern ExitProcess, GetActiveProcessorCount
 
 MAXT  equ 4096                  ; tokens in a reply, at most
-NTOP  equ 32
+NTOP  equ 48
 
 section .rdata
 k_model  db "model", 0

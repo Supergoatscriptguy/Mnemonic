@@ -338,7 +338,7 @@ section .text
 
 global mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
 global add_one, sub_one, signed_one, gcd_one, frac_one, pow_one, root_one, pct_one
-global order_one, word_one, sadd, coin, upto, powchain, divline
+global order_one, word_one, sadd, coin, upto, powchain, divline, scale, rootwork
 
 ; ---- steps
 
@@ -2113,7 +2113,30 @@ root_one:
     mov rcx, r15
     call emz
     emit 10
-    emit "assistant: Factor "
+    emit "assistant: "
+    mov rcx, r13
+    call rootwork
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; rcx = n: √n in simplest form, by factoring n and taking the pairs out, down to
+; "√n = a√b" or "√n can't be simplified.". rax = what comes out, rdx = what stays in
+rootwork:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    mov r13, rcx
+    emit "Factor "
     num r13
     emit " into primes. Each pair of the same prime comes out of the root as one of them.", 10
     mov rcx, r13
@@ -2205,6 +2228,8 @@ root_one:
 .eol2:
     emit 10
 .r:
+    mov rax, r14
+    mov rdx, r15
     add rsp, 56
     pop r15
     pop r14

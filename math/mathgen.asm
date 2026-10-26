@@ -1,4 +1,5 @@
-; mathgen [n=1000] [seed=1] [split=train|eval|all] [skip=file] [noise=1] [out=datasets\math\arith.txt]: math problems worked out
+; mathgen [n=1000] [seed=1] [split=train|eval|all] [skip=file] [noise=1] [only=units,money]
+; [out=datasets\math\arith.txt]: math problems worked out
 ; step by step, as conversations in chatdocs' text format: long multiplication and
 ; division, prime factorization, linear equations, factoring x^2 + bx + c, polynomial
 ; long division here, the rest of arithmetic in arith.asm and more algebra in
@@ -8,7 +9,7 @@
 ; split: a key for the problem itself (pkey) puts 1 in 16 in eval, and train never gets
 ; those, whatever the seed, the wording or how the working is written out. skip= leaves
 ; out every problem that's in another mathgen file, by the same key
-; uses: math\arith math\algebra math\decimal math\geometry math\algebra2 math\noise
+; uses: math\arith math\algebra math\decimal math\geometry math\algebra2 math\applied math\algebra3 math\noise
 default rel
 bits 64
 %include "lib.inc"
@@ -26,7 +27,9 @@ k_out    db "out", 0
 k_split  db "split", 0
 k_skip   db "skip", 0
 k_noise  db "noise", 0
+k_only   db "only", 0
 e_skip   db "can't read the skip file", 0
+e_only   db "only= has a topic that isn't one", 0
 d_split  db "train", 0
 s_eval   db "eval", 0
 s_all    db "all", 0
@@ -127,15 +130,18 @@ topics dq mul_one, div_one, factor_one, lin_one, quad_one, pdiv_one
        dq order_one, word_one, sys_one, expand_one, like_one, evalp_one, qeq_one
        dq dec_one, stats_one, ratio_one
        dq geo_one, ineq_one, seq_one, line_one, fac2_one, abs_one, expeq_one
+       dq units_one, money_one, change_one, prob_one, square_one, log_one, deriv_one
 tname  dq tn0, tn1, tn2, tn3, tn4, tn5, tn6, tn7, tn8, tn9, tn10, tn11, tn12, tn13
        dq tn14, tn15, tn16, tn17, tn18, tn19, tn20, tn21, tn22, tn23
        dq tn24, tn25, tn26, tn27, tn28, tn29, tn30
-NTOPIC equ 31
+       dq tn31, tn32, tn33, tn34, tn35, tn36, tn37
+NTOPIC equ 38
 ; how often each comes up, out of TWSUM. the ones with only a few hundred different
 ; problems in them (powers, roots, factoring) get less
 tw     db 7, 7, 5, 6, 3, 5, 4, 4, 5, 5, 7, 3, 3, 5, 6, 7, 5, 5, 4, 4, 5, 7, 4, 4
        db 6, 4, 4, 4, 5, 3, 3
-TWSUM  equ 149
+       db 6, 7, 5, 7, 4, 5, 5
+TWSUM  equ 188
 tn0 db "# mul", 10, 0
 tn1 db "# div", 10, 0
 tn2 db "# primes", 10, 0
@@ -167,6 +173,13 @@ tn27 db "# line", 10, 0
 tn28 db "# factor", 10, 0
 tn29 db "# abs", 10, 0
 tn30 db "# exponent", 10, 0
+tn31 db "# units", 10, 0
+tn32 db "# money", 10, 0
+tn33 db "# change", 10, 0
+tn34 db "# probability", 10, 0
+tn35 db "# square", 10, 0
+tn36 db "# log", 10, 0
+tn37 db "# derivative", 10, 0
 
 section .bss
 alignb 8
@@ -178,6 +191,7 @@ nprob    resq 1
 split    resq 1                 ; 0 train, 1 eval, 2 all
 seen     resq 1                 ; skip='s problems by pkey, or 0
 noise    resq 1                 ; 1 = questions typed like people type them (noise.asm)
+only     resq 1                 ; a bit per topic from only=, 0 = all of them
 nskip    resq 1
 na       resq 1
 nb       resq 1
@@ -250,6 +264,11 @@ start:
     mov rcx, rax
     call loadskip
 .noskip:
+    lea rcx, [k_only]
+    lea rdx, [empty]
+    call cfg_str
+    mov rcx, rax
+    call onlyset
     lea rcx, [s_dir]
     call make_dir
     mov rcx, [outp]
@@ -283,6 +302,12 @@ start:
     jmp .w
 .wd:
     mov eax, edx
+    mov rcx, [only]
+    test rcx, rcx
+    jz .any
+    bt rcx, rax
+    jnc .p
+.any:
     mov [rsp+32], rax
     mov [rsp+40], rdi           ; where this one starts
     lea rcx, [tname]
@@ -331,6 +356,60 @@ start:
     say 13, 10
     xor ecx, ecx
     call ExitProcess
+
+; rcx = only='s list, "units,money": the bits for those topics in only
+onlyset:
+    push rbx
+    push rsi
+    push r12
+    push r13
+    sub rsp, 40
+    mov rsi, rcx
+.tok:
+    cmp byte [rsi], 0
+    je .r
+    xor ebx, ebx
+.t:
+    cmp rbx, NTOPIC
+    jae .bad
+    lea rax, [tname]
+    mov r12, [rax+rbx*8]
+    add r12, 2                  ; past "# "
+    xor ecx, ecx
+.c:
+    movzx eax, byte [rsi+rcx]
+    movzx edx, byte [r12+rcx]
+    cmp edx, 10
+    je .end
+    cmp eax, edx
+    jne .next
+    inc rcx
+    jmp .c
+.end:
+    test eax, eax
+    jz .hit
+    cmp eax, ','
+    jne .next
+.hit:
+    bts [only], rbx
+    add rsi, rcx
+    cmp byte [rsi], ','
+    jne .tok
+    inc rsi
+    jmp .tok
+.next:
+    inc rbx
+    jmp .t
+.bad:
+    lea rcx, [e_only]
+    call fatal
+.r:
+    add rsp, 40
+    pop r13
+    pop r12
+    pop rsi
+    pop rbx
+    ret
 
 ; rcx, rdx = zero-terminated strings. eax = 1 if they're the same
 streq:

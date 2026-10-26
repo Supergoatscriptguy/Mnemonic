@@ -102,7 +102,7 @@ srt   resq 12
 
 section .text
 
-global dec_one, stats_one, ratio_one, pdec, pdecs
+global dec_one, stats_one, ratio_one, pdec, pdecs, ddivw
 
 ; rcx = v, rdx = d: v / 10^d with exactly d places, 3.50 or 0.05, or just v for d = 0
 pdec:
