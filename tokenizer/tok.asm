@@ -380,6 +380,9 @@ tok_encode:
     jae .done
     mov rcx, rsi
     mov rdx, r12
+    mov r8d, [rbx+TC_DIG3]
+    and r8d, 1
+    add r8d, 2
     call pretok_next
     mov r13, rax                ; end of this chunk
     mov r14, rax

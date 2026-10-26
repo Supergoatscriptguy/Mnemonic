@@ -31,10 +31,12 @@ ctx1     resq 1
 ctx2     resq 1
 enc1     resq 1
 enc2     resq 1
+enc3     resq 1
 decb     resq 1
 d        resq 1                 ; a mapped .docs
 tk       resq 1                 ; a mapped .tok
 bad      resq 1
+digs     resd 1                 ; digits per group for joined
 
 section .text
 
@@ -59,6 +61,7 @@ joined:
 .first:
     mov rcx, rsi
     mov rdx, rbx
+    mov r8d, [digs]
     call pretok_next
     mov rcx, rax
     sub rcx, rsi
@@ -85,12 +88,19 @@ joined:
     expect %2
 %endmacro
 
+%macro split3 2
+    mov dword [digs], 3
+    split %1, %2
+    mov dword [digs], 2
+%endmacro
+
 global start
 start:
     sub rsp, 40
     call lib_init
 
     say "pre-tokenizer", 13, 10
+    mov dword [digs], 2
     split "Hello world", "Hello| world"
     split "don't", "don|'t"
     split "I'll WE'RE they've", "I|'ll| WE|'RE| they|'ve"
@@ -111,6 +121,9 @@ start:
     split {0xe2, 0x80, 0x9c, "quoted", 0xe2, 0x80, 0x9d}, {0xe2, 0x80, 0x9c, "quoted|", 0xe2, 0x80, 0x9d}
     split {"a", 0xe2, 0x80, 0x94, "b"}, {"a|", 0xe2, 0x80, 0x94, "b"}
     split "x = y;", "x| =| y|;"
+    split3 "1234567", "123|456|7"
+    split3 "x 12+345=9", "x| |12|+|345|=|9"
+    split3 "4567.89", "456|7|.|89"
 
     lea rcx, [f_docs0]
     call file_exists
@@ -419,6 +432,111 @@ start:
     check a, "has assistant turns"
     cmp qword [bad], 0
     check e, "MASKBIT on exactly the assistant content + its <|end|>"
+
+    ; dig3=2: render each conversation all three ways, and the questions-only one
+    ; has to be the llama-style questions stitched to the plain answers
+    lea rcx, [f_sdocs]
+    call file_exists
+    test eax, eax
+    jz .end
+    say "llama-style numbers in the questions only", 13, 10
+    lea rcx, [f_sdocs]
+    call file_map
+    mov [d], rax
+    mov ecx, 1 << 22
+    call mem_alloc
+    mov [enc1], rax
+    mov ecx, 1 << 22
+    call mem_alloc
+    mov [enc2], rax
+    mov ecx, 1 << 22
+    call mem_alloc
+    mov [enc3], rax
+    mov qword [bad], 0
+    xor r12d, r12d
+    xor r13d, r13d              ; conversations where it changed something
+.sc:
+    cmp r12, 2000
+    jae .scd
+    mov rcx, [ctx1]
+    mov dword [rcx+TC_DIG3], 0
+    mov rdx, [d]
+    mov r8, r12
+    mov r9, [enc1]
+    call render_conv
+    mov r14, rax
+    mov rcx, [ctx1]
+    mov dword [rcx+TC_DIG3], 1
+    mov rdx, [d]
+    mov r8, r12
+    mov r9, [enc2]
+    call render_conv
+    cmp rax, r14
+    setne al
+    movzx eax, al
+    add r13, rax
+    mov rcx, [ctx1]
+    mov dword [rcx+TC_DIG3], 2
+    mov rdx, [d]
+    mov r8, r12
+    mov r9, [enc3]
+    call render_conv
+    mov rsi, [enc1]
+    mov rdi, [enc2]
+    mov r8, [enc3]
+    lea r9, [r8+rax*2]
+    mov ax, [rsi]               ; <|bos|>
+    cmp ax, [r8]
+    jne .sbad
+    add rsi, 2
+    add rdi, 2
+    add r8, 2
+.seg:
+    cmp r8, r9
+    jae .send
+    mov r10, rdi                ; a question: the llama-style one
+    cmp word [rsi], TOK_ASSIST
+    jne .scmp
+    mov r10, rsi
+.scmp:
+    cmp r8, r9
+    jae .sbad
+    movzx eax, word [r10]
+    cmp ax, [r8]
+    jne .sbad
+    add r10, 2
+    add r8, 2
+    and eax, MASKBIT - 1
+    cmp eax, TOK_END
+    jne .scmp
+.sa:
+    movzx eax, word [rsi]
+    add rsi, 2
+    and eax, MASKBIT - 1
+    cmp eax, TOK_END
+    jne .sa
+.sb:
+    movzx eax, word [rdi]
+    add rdi, 2
+    and eax, MASKBIT - 1
+    cmp eax, TOK_END
+    jne .sb
+    jmp .seg
+.send:
+    mov rax, [enc1]
+    lea rax, [rax+r14*2]
+    cmp rsi, rax
+    je .snext
+.sbad:
+    inc qword [bad]
+.snext:
+    inc r12
+    jmp .sc
+.scd:
+    cmp qword [bad], 0
+    check e, "dig3=2: questions split like llama.cpp, answers like before"
+    cmp r13, 0
+    check a, "and it changed some of them"
 .end:
     jmp t_done
 

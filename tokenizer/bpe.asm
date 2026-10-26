@@ -118,6 +118,7 @@ count_task:
     jae .ndoc
     mov rcx, rsi
     mov rdx, r14
+    mov r8d, 2
     call pretok_next
     mov r15, rax
     mov rdx, rax

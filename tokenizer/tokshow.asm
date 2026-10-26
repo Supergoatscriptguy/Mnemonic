@@ -1,6 +1,6 @@
 ; tokshow "some text"        shows how the tokenizer splits it
 ; tokshow file.docs N         doc N of a .docs file (conversation N for chat files)
-; [tok=datasets\tokenizer.bin]
+; [tok=datasets\tokenizer.bin] [dig3=1 splits numbers in 3s, like llama.cpp]
 ; on a console every token gets its own background color, specials are yellow and
 ; the tokens a chat model is trained to produce are shaded green. redirected, the
 ; tokens are just separated with |
@@ -15,6 +15,7 @@ extern ExitProcess
 
 section .rdata
 k_tok    db "tok", 0
+k_dig3   db "dig3", 0
 d_tok    db "datasets\tokenizer.bin", 0
 usage    db 'usage: tokshow "text" | tokshow file.docs N  [tok=...]', 13, 10, 0
 e_tok    db "can't load the tokenizer (train one with bpetrain)", 0
@@ -88,6 +89,10 @@ start:
 .loaded:
     call tok_cache_new
     mov r15, rax
+    lea rcx, [k_dig3]
+    xor edx, edx
+    call cfg_int
+    mov [r15+TC_DIG3], eax
     ; a .docs file and an index, or just text?
     mov rsi, [argv+8]
     mov rcx, rsi

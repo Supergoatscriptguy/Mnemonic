@@ -93,7 +93,8 @@ cls:
 .done:
     ret
 
-; rcx = start of a chunk, rdx = end of the text. rax = end of the chunk
+; rcx = start of a chunk, rdx = end of the text, r8 = most digits in a group
+; (2, or 3 to split numbers like llama.cpp does). rax = end of the chunk
 global pretok_next
 pretok_next:
     push rbx
@@ -220,12 +221,13 @@ pretok_next:
 
 .digits:
     add rsi, rcx
+    dec r8d
+    jz .ret_rsi
     cmp rsi, r11
     jae .ret_rsi
     call cls
     cmp eax, C_N
-    jne .ret_rsi
-    add rsi, rcx
+    je .digits
     jmp .ret_rsi
 
 .space:

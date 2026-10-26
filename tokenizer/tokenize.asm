@@ -1,6 +1,8 @@
 ; tokenize file.docs ... [tok=datasets\tokenizer.bin]: writes file.tok next to each.
 ; plain docs become <|bos|> + tokens, one after another. chat files get the chat
-; template, with MASKBIT on the assistant's tokens. all threads, in blocks of docs
+; template, with MASKBIT on the assistant's tokens. all threads, in blocks of docs.
+; dig3=N: in 1 of every N conversations the questions split numbers in 3s like
+; llama.cpp does, so a model trained on it reads prompts from both
 ; uses: tokenizer\pretok tokenizer\tok tokenizer\render
 default rel
 bits 64
@@ -21,10 +23,11 @@ W_SIZE    equ 64
 
 section .rdata
 k_tok    db "tok", 0
+k_dig3   db "dig3", 0
 d_tok    db "datasets\tokenizer.bin", 0
 s_tok    db ".tok", 0
 s_tmp    db ".tmp", 0
-usage    db "usage: tokenize file.docs ... [tok=datasets\tokenizer.bin]", 13, 10, 0
+usage    db "usage: tokenize file.docs ... [tok=datasets\tokenizer.bin] [dig3=N]", 13, 10, 0
 e_tok    db "can't load the tokenizer", 0
 e_docs   db "not a .docs file", 0
 e_write  db "couldn't write the .tok file", 0
@@ -38,6 +41,7 @@ chat     resq 1
 nitems   resq 1
 res      resq 1                 ; per block: tokens ptr, count
 maxlen   resq 1                 ; tokens needed for the biggest item
+dig3n    resq 1
 hdr      resb TF_SIZE
 outpath  resb 1024
 tmppath  resb 1024
@@ -91,6 +95,10 @@ start:
     lea rcx, [e_tok]
     call fatal
 .loaded:
+    lea rcx, [k_dig3]
+    xor edx, edx
+    call cfg_int
+    mov [dig3n], rax
     xor ecx, ecx
     call pool_init
     xor ebx, ebx
@@ -415,6 +423,21 @@ block_task:
 .item:
     cmp r14, r15
     jae .bnext
+    cmp qword [dig3n], 0
+    je .nd
+    mov rax, r14                ; hashed, so it can't line up with mathgen's topic order
+    mov rcx, 0x9e3779b97f4a7c15
+    imul rax, rcx
+    shr rax, 32
+    xor edx, edx
+    div qword [dig3n]
+    xor eax, eax
+    test rdx, rdx
+    setz al
+    add eax, eax
+    mov rcx, [rbx+W_CTX]
+    mov [rcx+TC_DIG3], eax
+.nd:
     mov rcx, [rbx+W_CTX]
     mov rdx, [docs]
     mov r8, r14

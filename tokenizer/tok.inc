@@ -22,6 +22,8 @@ MAXWORD    equ 256              ; longest chunk that bpe training looks at
 TC_CACHE   equ 0
 TC_WORK    equ 8
 TC_NOCACHE equ 16               ; set to 1 to skip the cache (for checking it)
+TC_DIG3    equ 20               ; bit 0: numbers in groups of 3, the way llama.cpp reads them.
+                                ; bit 1: render_conv sets bit 0 for all but the assistant's turns
 TC_SIZE    equ 64
 
 ; tokenizer file: header, then u32 merges (a | b << 16), merge i makes token 256+i

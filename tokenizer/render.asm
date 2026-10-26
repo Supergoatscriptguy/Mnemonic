@@ -66,6 +66,13 @@ render_conv:
     mov ax, [rax+r14*2]
     mov [rdi], ax
     add rdi, 2
+    test byte [r12+TC_DIG3], 2
+    jz .enc
+    and byte [r12+TC_DIG3], ~1  ; llama-style numbers in what the model reads, not what it writes
+    cmp r14d, ROLE_ASSIST
+    je .enc
+    or byte [r12+TC_DIG3], 1
+.enc:
     mov rax, [rbx+DH_OFFS]
     add rax, rbx
     mov rdx, [rax+rsi*8]
