@@ -1065,6 +1065,32 @@ deriv_one:
 .deg:
     call rnd
     mov r12, rax
+    xor ecx, ecx                ; 1 in 6 is just one term, half of those x^n on its own
+    mov edx, 5
+    call rnd
+    test eax, eax
+    jnz .terms
+    lea rdx, [pa]
+    xor ecx, ecx
+.z:
+    mov qword [rdx+rcx*8], 0
+    inc rcx
+    cmp rcx, r12
+    jb .z
+    mov qword [rdx+r12*8], 1
+    call coin
+    test eax, eax
+    jz .ask
+.a1:
+    mov rcx, r13
+    neg rcx
+    mov rdx, r13
+    call rnd
+    test rax, rax
+    jz .a1
+    lea rcx, [pa]
+    mov [rcx+r12*8], rax
+    jmp .ask
 .terms:
     xor ebx, ebx
 .c:
@@ -1103,7 +1129,7 @@ deriv_one:
     jbe .cnt
     cmp eax, 2
     jb .terms
-    ; the question
+.ask:
     mov [rsp+32], rdi
     lea rdi, [qbuf]
     lea rcx, [pa]

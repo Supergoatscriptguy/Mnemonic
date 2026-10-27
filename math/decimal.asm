@@ -973,7 +973,7 @@ stats_one:
     push r14
     push r15
     sub rsp, 56
-    mov ecx, 5
+    mov ecx, 3
     mov edx, 9
     call rnd
     mov r12, rax                ; how many
@@ -999,6 +999,10 @@ stats_one:
     mov edx, 3
     call rnd
     mov r13, rax
+    cmp r13, r12                ; not all three the same
+    jb .m3
+    dec r13
+.m3:
     lea rcx, [lst]
     mov rax, [rcx]
     mov r14, rax                ; the mode, before the shuffle moves it
