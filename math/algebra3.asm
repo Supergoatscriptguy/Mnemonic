@@ -456,9 +456,14 @@ log_one:
     mov r14, rax
 .pk:
     xor ecx, ecx
-    mov edx, 9
+    mov edx, 19
     call rnd
     mov r12, rax                ; k
+    cmp rbx, 10                 ; powers of 10 are just their 0s, so they go higher
+    jne .k0
+    cmp r12, 12
+    ja .pick
+.k0:
     cmp r15, 6
     jae .k1
     cmp r12, 2                  ; log_b(1) and log_b(b) now and then
@@ -481,8 +486,11 @@ log_one:
     dec rcx
     jmp .pw
 .pd:
+    cmp rbx, 10
+    je .p10
     cmp rax, 1000000
     ja .pick
+.p10:
     mov r13, rax                ; b^k
     cmp r15, 6
     jb .val
@@ -708,7 +716,48 @@ log_one:
     lea rcx, [qlog]
     mov edx, NQLOG
     call askt
-    emit "assistant: Write both as powers of "
+    ; start the way a whole power would, so passing n is what says it isn't one
+    emit "assistant: "
+    call logf
+    emit " asks what power of "
+    num [rsp+40]
+    emit " makes "
+    num [rsp+48]
+    emit ".", 10
+    mov rax, [rsp+40]
+    cmp rax, [rsp+48]
+    jb .fm
+    num [rsp+48]
+    emit " is less than "
+    num [rsp+40]
+    emit ", so it isn't a whole power of "
+    num [rsp+40]
+    emit ".", 10
+    jmp .fw
+.fm:
+    emit "Multiply "
+    num [rsp+40]
+    emit "s until it gets there.", 10
+    mov r14, [rsp+40]
+    mov r15d, 1
+.fn:
+    imul r14, [rsp+40]
+    inc r15
+    cmp r14, [rsp+48]
+    jb .fn
+    mov rcx, [rsp+40]
+    mov rdx, r15
+    call powchain
+    num r14
+    emit " is past "
+    num [rsp+48]
+    emit ", so "
+    num [rsp+48]
+    emit " isn't a whole power of "
+    num [rsp+40]
+    emit ".", 10
+.fw:
+    emit "Write both as powers of "
     num rbx
     emit ".", 10
     mov rdx, r12

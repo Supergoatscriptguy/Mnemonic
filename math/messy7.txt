@@ -1,0 +1,178 @@
+# more of the newer topics, typed the way people type, written before math7 so it
+# doesn't get fitted to. bin\matheval file=math\messy7.txt
+
+# units
+user: how many seconds in 4 minutes
+assistant: 4 minutes = 240 seconds
+
+# units
+user: 3 gallons to quarts
+assistant: 3 gallons = 12 quarts
+
+# units
+user: convert 250 cm to meters
+assistant: 250 centimeters = 2.5 meters
+
+# units
+user: how many feet is 4 yards?
+assistant: 4 yards = 12 feet
+
+# units
+user: 2 weeks in days
+assistant: 2 weeks = 14 days
+
+# units
+user: 1500 grams is how many kg
+assistant: 1500 grams = 1.5 kilograms
+
+# money
+user: 30% off $120
+assistant: Answer: $84
+
+# money
+user: how much is a 15% tip on $60
+assistant: Answer: $9
+
+# money
+user: $40 plus 6% tax
+assistant: Answer: $42.40
+
+# money
+user: i buy 3 pens at $1.25 each, whats the total
+assistant: Answer: $3.75
+
+# money
+user: a pack of 6 cookies is $4.50, how much is one cookie
+assistant: Answer: $0.75
+
+# money
+user: a shirt costs $17.60 and i pay with a $20 bill. change?
+assistant: Answer: $2.40
+
+# money
+user: simple interest on $800 at 5% for 2 years?
+assistant: Answer: $80
+
+# change
+user: percent decrease from 50 to 35
+assistant: The percent decrease is 30%.
+
+# change
+user: the price went from $40 to $50, whats the percent increase
+assistant: The percent increase is 25%.
+
+# change
+user: how much percent did it go up from 120 to 150
+assistant: The percent increase is 25%.
+
+# change
+user: 18 is 30% of what number
+assistant: The number is 60.
+
+# change
+user: 15% of a number is 45, find the number
+assistant: The number is 300.
+
+# change
+user: after a 10% decrease its $90. what was it originally
+assistant: Before, it was 100.
+
+# probability
+user: chance of rolling a 1 on a die
+assistant: The probability is 1/6.
+
+# probability
+user: whats the probability of rolling higher than 4 on a die
+assistant: The probability is 1/3.
+
+# probability
+user: flip 2 coins, chance both are tails
+assistant: The probability is 1/4.
+
+# probability
+user: a jar has 4 green and 6 yellow candies. probability of picking green?
+assistant: The probability is 2/5.
+
+# probability
+user: probability of a heart from a deck of 52 cards
+assistant: The probability is 1/4.
+
+# probability
+user: two dice are rolled, chance of a sum of 12
+assistant: The probability is 1/36.
+
+# probability
+user: a bag has 2 red and 3 blue balls, you pick 2 without replacement. chance both are red?
+assistant: The probability is 1/10.
+
+# square
+user: x^2 = 81
+assistant: x = 9 or x = -9
+
+# square
+user: solve x²=200
+assistant: x = 10√2 or x = -10√2
+
+# square
+user: 3x^2=48, x=?
+assistant: x = 4 or x = -4
+
+# square
+user: x^2 + 4 = 40
+assistant: x = 6 or x = -6
+
+# square
+user: solve (x-3)^2 = 16
+assistant: x = 7 or x = -1
+
+# square
+user: x^2 = -4
+assistant: There are no real solutions.
+
+# log
+user: log base 5 of 125
+assistant: log_5(125) = 3
+
+# log
+user: log 100
+assistant: log(100) = 2
+
+# log
+user: whats log_2 64
+assistant: log_2(64) = 6
+
+# log
+user: log3(9)
+assistant: log_3(9) = 2
+
+# log
+user: log_10(10000)?
+assistant: log_10(10000) = 4
+
+# log
+user: log_2 x = 3, x = ?
+assistant: x = 8
+
+# derivative
+user: derivative of 5x^2
+assistant: The derivative is 10x.
+
+# derivative
+user: d/dx x^4 - 2x^2
+assistant: The derivative is 4x^3 - 4x.
+
+# derivative
+user: find dy/dx for y = 7x^3 + x
+assistant: dy/dx = 21x^2 + 1
+
+# derivative
+user: f(x) = x^3, what is f'(2)
+assistant: f'(2) = 12
+
+# derivative
+user: slope of y = 2x^2 - x at x = 3
+assistant: The slope is 11.
+
+# derivative
+user: 2nd derivative of 2x^3 + x^2
+assistant: The second derivative is 12x + 2.

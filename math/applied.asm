@@ -785,6 +785,8 @@ mc0 db "You buy a @i for $@a and a @j for $@b and pay with $@c. How much change 
 mc1 db "You spend $@a and $@b and hand over $@c. What is your change?", 0
 mc2 db "A @i costs $@a. You pay with $@c. How much change do you get?", 0
 mc3 db "You pay for a $@a @i with $@c. What is your change?", 0
+mc4 db "Something costs $@a and you pay with $@c. How much change do you get?", 0
+mc5 db "If you pay $@c for something that costs $@a, how much change do you get?", 0
 mn0 db "@n @u cost $@a each. What is the total?", 0
 mn1 db "How much do @n @u cost at $@a each?", 0
 mn2 db "One @w costs $@a. How much are @n of them?", 0
@@ -804,7 +806,7 @@ qmq dq mq0, mq1
 mtab dq qmd, 6, qms, 3, qmt, 4, qmx, 2, qmp, 3, qmq, 2
 qmr dq mr0, mr1, mr2
 qmc2 dq mc0, mc1
-qmc1 dq mc2, mc3
+qmc1 dq mc2, mc3, mc4, mc5
 qmn dq mn0, mn1, mn2
 qmu dq mu0, mu1
 qmi dq mi0, mi1
@@ -1325,11 +1327,12 @@ money_one:
     mov rax, [rax+r13*8]
     mov [fc], rax
     lea rcx, [qmc1]
+    mov edx, 4
     test r12, r12
     jz .cq
     lea rcx, [qmc2]
-.cq:
     mov edx, 2
+.cq:
     call askt
     emit "assistant: "
     test r12, r12
@@ -1573,6 +1576,7 @@ co0 db "@k is @p% of what number?", 0
 co1 db "@p% of a number is @k. What is the number?", 0
 co2 db "If @p% of x is @k, what is x?", 0
 co3 db "@k is @p% of a number. Find the number.", 0
+co4 db "@k is @p% of what?", 0
 cu0 db "After a @p% increase a price is $@k. What was it before?", 0
 cu1 db "A number goes up by @p% to @k. What was the number?", 0
 cu2 db "After growing by @p%, a town has @k people. How many did it have before?", 0
@@ -1582,7 +1586,7 @@ cw2 db "A car lost @p% of its value and is now worth $@k. What was it worth befo
 align 8
 qcinc dq ci0, ci1, ci2, ci3, ci4, cc0, cc1
 qcdec dq cd0, cd1, cd2, cd3, cd4, cc0, cc1
-qcof  dq co0, co1, co2, co3
+qcof  dq co0, co1, co2, co3, co4
 qcup  dq cu0, cu1, cu2
 qcdn  dq cw0, cw1, cw2
 
@@ -1713,7 +1717,7 @@ change_one:
     mov [fk], rax               ; p% of it
     mov [fpc], r12
     lea rcx, [qcof]
-    mov edx, 4
+    mov edx, 5
     call askt
     emit "assistant: "
     num r12
@@ -1927,6 +1931,7 @@ py0 db "A bag has @i @u. You pick one and put it back, then pick another. What's
 pc0 db "What is the probability of drawing @j from a standard deck of 52 cards?", 0
 pc1 db "You draw one card from a shuffled 52-card deck. What's the chance it's @j?", 0
 pc2 db "A card is picked at random from a deck of 52. What is the probability that it is @j?", 0
+pc3 db "What's the probability of drawing @j from a 52 card deck?", 0
 px1 db "A coin is flipped @n times. About how many heads would you expect?", 0
 px2 db "If you toss a coin @n times, about how many times should it land on tails?", 0
 px3 db "A die is rolled @n times. About how many times would you expect to roll a @k?", 0
@@ -1994,7 +1999,7 @@ cards dq kc0, kf0, 13,  kc1, kf1, 13,  kc2, kf2, 13,  kc3, kf3, 13
       dq kc8, kf8, 26,  kc9, kf9, 26,  kc10, kf10, 12
       dq kc11, kf11, 1,  kc12, kf12, 1,  kc13, kf13, 1,  kc14, kf14, 2,  kc15, kf15, 2
 NCARD equ 16
-qpc dq pc0, pc1, pc2
+qpc dq pc0, pc1, pc2, pc3
 
 section .bss
 alignb 8
@@ -3016,7 +3021,7 @@ prob_one:
     mov rax, [rbx]
     mov [fj], rax
     lea rcx, [qpc]
-    mov edx, 3
+    mov edx, 4
     call askt
     emit "assistant: A deck has 52 cards, 13 in each of 4 suits: hearts, diamonds, clubs and spades.", 10
     mov rcx, [rbx+8]

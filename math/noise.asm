@@ -1,6 +1,6 @@
 ; mathgen's questions the way people type them: lowercase, no full stop, no spaces
 ; around the signs, * or x for ×, / for ÷, ² and ³, commas in big numbers, "whats",
-; a "pls" in front. only the question changes. the answers restate the problem the
+; a "pls" in front, no "What is the", log 1000 for log(1000). only the question changes. the answers restate the problem the
 ; tidy way, so the model learns to read the messy one and write the clean one.
 ; it has its own random numbers, so noise=0 and noise=1 make the same problems
 default rel
@@ -18,6 +18,8 @@ N_SUP   equ 1 << 6              ; ^2 ^3 as ² ³
 N_COMMA equ 1 << 7              ; 12,345
 N_CHAT  equ 1 << 8
 N_WHATS equ 1 << 9
+N_TERSE equ 1 << 10             ; no "What is the" in front
+N_LOGB  equ 1 << 11             ; log 1000, log_2 x
 
 section .rdata
 c0 db "pls ", 0
@@ -30,6 +32,13 @@ chat dq c0, c1, c2, c3, c4
 NCHAT equ 5
 s_whats  db "whats ", 0
 s_whats2 db "what's ", 0
+ld0 db "What is the ", 0
+ld1 db "What's the ", 0
+ld2 db "What are the ", 0
+ld3 db "Find the ", 0
+align 8
+leads dq ld0, ld1, ld2, ld3
+NLEAD equ 4
 
 section .bss
 alignb 8
@@ -146,6 +155,18 @@ pickflags:
     jz .9
     or ebx, N_WHATS
 .9:
+    mov ecx, 20
+    call chance
+    test eax, eax
+    jz .10
+    or ebx, N_TERSE
+.10:
+    mov ecx, 40
+    call chance
+    test eax, eax
+    jz .11
+    or ebx, N_LOGB
+.11:
     mov eax, ebx
     add rsp, 40
     pop r12
@@ -195,6 +216,73 @@ oplen:
     mov eax, 3
     ret
 
+; rsi = text, rcx = a string: rax = its length if the text starts with it, else 0
+starts:
+    xor eax, eax
+.l:
+    movzx edx, byte [rcx+rax]
+    test edx, edx
+    jz .r
+    cmp dl, [rsi+rax]
+    jne .no
+    inc eax
+    jmp .l
+.no:
+    xor eax, eax
+.r:
+    ret
+
+; rsi = a ( in the question, rdi = what's written so far: rax = the ) that closes it
+; if it's log(n) or log_b(n) with n just digits or x, else 0
+logbr:
+    lea r8, [nq]
+    lea rdx, [rdi-1]
+    mov r9, rdx
+.bd:
+    cmp rdx, r8
+    jb .no
+    movzx eax, byte [rdx]
+    sub eax, '0'
+    cmp eax, 9
+    ja .bu
+    dec rdx
+    jmp .bd
+.bu:
+    cmp rdx, r9
+    je .g                       ; log(
+    cmp byte [rdx], '_'
+    jne .no
+    dec rdx
+.g:
+    lea rax, [r8+2]
+    cmp rdx, rax
+    jb .no
+    cmp byte [rdx], 'g'
+    jne .no
+    cmp word [rdx-2], 'lo'
+    jne .no
+    lea rax, [rsi+1]
+.f:
+    movzx edx, byte [rax]
+    cmp dl, ')'
+    je .fe
+    cmp dl, 'x'
+    je .fn
+    sub edx, '0'
+    cmp edx, 9
+    ja .no
+.fn:
+    inc rax
+    jmp .f
+.fe:
+    lea rdx, [rsi+1]
+    cmp rax, rdx
+    je .no
+    ret
+.no:
+    xor eax, eax
+    ret
+
 ; rsi = an operator, ecx = its length: it at rdi, × and ÷ the way the flags say (r15)
 putop:
     cmp ecx, 2
@@ -238,9 +326,10 @@ noisify:
     push r13
     push r14
     push r15
-    sub rsp, 56
+    sub rsp, 72
     mov [rsp+32], rdi           ; the end
     mov qword [rsp+48], 0       ; bracket depth
+    mov qword [rsp+56], 0       ; a log's ) to leave out
     mov rsi, rcx
 .t:
     cmp byte [rsi], 10          ; past "# topic"
@@ -267,13 +356,30 @@ noisify:
     lea rdi, [nq]
     mov rsi, r12
     test r15d, N_CHAT
-    jz .wh
+    jz .te
     mov ecx, NCHAT
     call pickn
     lea rcx, [chat]
     mov rcx, [rcx+rax*8]
     call emz
     or r15d, N_LOWER            ; "pls What is" reads wrong
+.te:
+    test r15d, N_TERSE
+    jz .wh
+    xor ebx, ebx
+.ld:
+    lea rcx, [leads]
+    mov rcx, [rcx+rbx*8]
+    call starts
+    test eax, eax
+    jnz .cut
+    inc ebx
+    cmp ebx, NLEAD
+    jb .ld
+    jmp .wh
+.cut:
+    add rsi, rax                ; what's left is lowercase already, or LCM
+    jmp .body
 .wh:
     test r15d, N_WHATS
     jz .lo
@@ -306,6 +412,25 @@ noisify:
 .body:
     cmp rsi, r13
     jae .end
+    movzx eax, byte [rsi]
+    cmp rsi, [rsp+56]
+    jne .lb
+    inc rsi
+    jmp .body
+.lb:
+    test r15d, N_LOGB
+    jz .sq0
+    cmp al, '('
+    jne .sq0
+    call logbr
+    test rax, rax
+    jz .sq0
+    mov [rsp+56], rax
+    mov byte [rdi], ' '
+    inc rdi
+    inc rsi
+    jmp .body
+.sq0:
     movzx eax, byte [rsi]
     ; " op " squeezed to "op", and (1, 2) to (1,2)
     test r15d, N_SQ
@@ -489,7 +614,7 @@ noisify:
     lea rsi, [nrest]
     mov rcx, [rsp+40]
     rep movsb
-    add rsp, 56
+    add rsp, 72
     pop r15
     pop r14
     pop r13
