@@ -1,0 +1,194 @@
+# all the topics typed the way people type them, written before math8 trained, so it
+# isn't fitted to. bin\matheval file=math\messy8.txt
+
+# mul
+user: how much is 46 times 73
+assistant: 46 × 73 = 3358
+
+# mul
+user: 125x8
+assistant: 125 × 8 = 1000
+
+# div
+user: 864 / 12
+assistant: 864 ÷ 12 = 72
+
+# div
+user: divide 100 by 7
+assistant: 100 ÷ 7 = 14 remainder 2
+
+# add
+user: what's 999 + 1001
+assistant: 999 + 1001 = 2000
+
+# sub
+user: 5000 - 1234
+assistant: 5000 - 1234 = 3766
+
+# signed
+user: -12 - 7
+assistant: -12 - 7 = -19
+
+# frac
+user: 2/3 - 1/4
+assistant: 2/3 - 1/4 = 5/12
+
+# frac
+user: reduce 45/60
+assistant: 45/60 = 3/4
+
+# percent
+user: what is 35% of 200
+assistant: 35% of 200 = 70
+
+# primes
+user: prime factorization of 84
+assistant: 84 = 2^2 × 3 × 7
+
+# gcd
+user: greatest common factor of 36 and 60
+assistant: gcd(36, 60) = 12
+
+# gcd
+user: least common multiple of 4 and 6
+assistant: lcm(4, 6) = 12
+
+# power
+user: 3 cubed
+assistant: 3^3 = 27
+
+# root
+user: sqrt 81
+assistant: √81 = 9
+
+# root
+user: simplify √72
+assistant: √72 = 6√2
+
+# linear
+user: 4x - 3 = 13
+assistant: x = 4
+
+# quadratic
+user: factor x^2 - x - 12
+assistant: x^2 - x - 12 = (x + 3)(x - 4)
+
+# solve
+user: solve x^2 + 2x - 15 = 0
+assistant: x = 3 or x = -5
+
+# system
+user: x + y = 7 and x - y = 1
+assistant: x = 4, y = 3
+
+# expand
+user: expand (x+4)^2
+assistant: (x + 4)^2 = x^2 + 8x + 16
+
+# order
+user: 10 - 2*3
+assistant: 10 - 2 × 3 = 4
+
+# decimal
+user: 1.5 + 2.75
+assistant: 1.5 + 2.75 = 4.25
+
+# decimal
+user: 1/4 as a decimal
+assistant: 1/4 = 0.25
+
+# stats
+user: mean of 2 4 6 8
+assistant: The mean is 5.
+
+# stats
+user: whats the median of 7, 3, 9
+assistant: The median is 7.
+
+# geometry
+user: perimeter of a square with side 5 cm
+assistant: Answer: 20 cm
+
+# words
+user: i have 3 bags with 8 apples in each. how many apples is that
+assistant: Answer: 24 apples
+
+# sequence
+user: 6th term of 5, 10, 15, 20
+assistant: The 6th term is 30.
+
+# line
+user: slope of the line through (0, 1) and (2, 7)
+assistant: The slope is 3.
+
+# inequality
+user: 3x - 2 < 10
+assistant: x < 4
+
+# abs
+user: |x + 1| = 4
+assistant: x = 3 or x = -5
+
+# exponent
+user: 3^x = 81
+assistant: x = 4
+
+# factor
+user: factor x^2 - 49
+assistant: x^2 - 49 = (x - 7)(x + 7)
+
+# polydiv
+user: divide x^2 + 5x + 6 by x + 2
+assistant: (x^2 + 5x + 6) ÷ (x + 2) = x + 3
+
+# evaluate
+user: what is x^2 - 3x when x = 5
+assistant: x^2 - 3x = 10 when x = 5
+
+# like
+user: simplify 7x - 3x + 2
+assistant: 7x - 3x + 2 = 4x + 2
+
+# ratio
+user: simplify the ratio 12:8
+assistant: 12:8 = 3:2
+
+# units
+user: how many cm in 2 m
+assistant: 2 meters = 200 centimeters
+
+# money
+user: 20% off a $35 shirt
+assistant: Answer: $28
+
+# change
+user: what's the percent increase from 200 to 250
+assistant: The percent increase is 25%.
+
+# probability
+user: probability of 2 heads in a row
+assistant: The probability is 1/4.
+
+# probability
+user: roll a die, chance of an odd number
+assistant: The probability is 1/2.
+
+# square
+user: x^2 = 64
+assistant: x = 8 or x = -8
+
+# log
+user: log2 8
+assistant: log_2(8) = 3
+
+# log
+user: log_9(27)
+assistant: log_9(27) = 3/2
+
+# derivative
+user: derivative of x^2 + 3x
+assistant: The derivative is 2x + 3.
+
+# derivative
+user: what's the slope of y = x^3 at x = 2
+assistant: The slope is 12.

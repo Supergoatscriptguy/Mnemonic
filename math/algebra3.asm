@@ -714,7 +714,7 @@ log_one:
     mov rcx, rbx
     mov rdx, r13
     call ipow
-    cmp rax, 2000000
+    cmp rax, 100000
     ja .frac
     mov [rsp+48], rax           ; n
     mov [rsp+32], rdi
