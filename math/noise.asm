@@ -1,6 +1,7 @@
 ; mathgen's questions the way people type them: lowercase, no full stop, no spaces
 ; around the signs, * or x for ×, / for ÷, ² and ³, commas in big numbers, "whats",
-; a "pls" in front, no "What is the", log 1000 for log(1000). only the question changes. the answers restate the problem the
+; a "pls" in front, no "What is the", log 1000 for log(1000) or log3(9), lists with no
+; commas, 2nd derivative. only the question changes. the answers restate the problem the
 ; tidy way, so the model learns to read the messy one and write the clean one.
 ; it has its own random numbers, so noise=0 and noise=1 make the same problems
 default rel
@@ -20,6 +21,9 @@ N_CHAT  equ 1 << 8
 N_WHATS equ 1 << 9
 N_TERSE equ 1 << 10             ; no "What is the" in front
 N_LOGB  equ 1 << 11             ; log 1000, log_2 x
+N_LIST  equ 1 << 12             ; 3 1 4 1 5 for 3, 1, 4, 1, 5
+N_LOGU  equ 1 << 13             ; log3(9)
+N_2ND   equ 1 << 14             ; 2nd derivative
 
 section .rdata
 c0 db "pls ", 0
@@ -39,6 +43,7 @@ ld3 db "Find the ", 0
 align 8
 leads dq ld0, ld1, ld2, ld3
 NLEAD equ 4
+s_second db "second d", 0
 
 section .bss
 alignb 8
@@ -167,6 +172,24 @@ pickflags:
     jz .11
     or ebx, N_LOGB
 .11:
+    mov ecx, 15
+    call chance
+    test eax, eax
+    jz .12
+    or ebx, N_LIST
+.12:
+    mov ecx, 30
+    call chance
+    test eax, eax
+    jz .13
+    or ebx, N_LOGU
+.13:
+    mov ecx, 30
+    call chance
+    test eax, eax
+    jz .14
+    or ebx, N_2ND
+.14:
     mov eax, ebx
     add rsp, 40
     pop r12
@@ -431,6 +454,59 @@ noisify:
     inc rsi
     jmp .body
 .sq0:
+    movzx eax, byte [rsi]
+    test r15d, N_LOGU
+    jz .nu
+    cmp al, '_'
+    jne .nu
+    lea rdx, [nq+3]
+    cmp rdi, rdx
+    jb .nu
+    cmp byte [rdi-1], 'g'
+    jne .nu
+    cmp word [rdi-3], 'lo'
+    jne .nu
+    inc rsi
+    jmp .body
+.nu:
+    ; "3, 1, 4" to "3 1 4", only between plain digits and not in brackets
+    test r15d, N_LIST
+    jz .nl
+    cmp al, ','
+    jne .nl
+    cmp qword [rsp+48], 0
+    jne .nl
+    cmp rsi, r12
+    je .nl
+    cmp byte [rsi+1], ' '
+    jne .nl
+    movzx edx, byte [rsi+2]
+    sub edx, '0'
+    cmp edx, 9
+    ja .nl
+    movzx edx, byte [rsi-1]
+    sub edx, '0'
+    cmp edx, 9
+    ja .nl
+    mov byte [rdi], ' '
+    inc rdi
+    add rsi, 2
+    jmp .body
+.nl:
+    test r15d, N_2ND
+    jz .n2
+    cmp al, 's'
+    jne .n2
+    lea rcx, [s_second]
+    call starts
+    test eax, eax
+    jz .n2
+    mov word [rdi], '2n'
+    mov byte [rdi+2], 'd'
+    add rdi, 3
+    add rsi, 6                  ; the " d" gets copied as it is
+    jmp .body
+.n2:
     movzx eax, byte [rsi]
     ; " op " squeezed to "op", and (1, 2) to (1,2)
     test r15d, N_SQ

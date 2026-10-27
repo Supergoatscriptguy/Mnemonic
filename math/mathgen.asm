@@ -193,6 +193,7 @@ seen     resq 1                 ; skip='s problems by pkey, or 0
 noise    resq 1                 ; 1 = questions typed like people type them (noise.asm)
 only     resq 1                 ; a bit per topic from only=, 0 = all of them
 nskip    resq 1
+small    resb 1                 ; set by a topic when there are too few problems like this one to hold any out
 na       resq 1
 nb       resq 1
 nq       resq 1
@@ -215,7 +216,7 @@ section .text
 
 global rnd, ndig, digits, emz, ask, askpre, askpre3, letr, mono, pmono, sterm, poly, lin
 global mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom, sdiv
-global letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
+global letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty, small
 
 global start
 start:
@@ -314,6 +315,7 @@ start:
     mov rcx, [rcx+rax*8]
     call emz
     mov rax, [rsp+32]
+    mov byte [small], 0
     lea rcx, [topics]
     call [rcx+rax*8]
     mov rcx, [rsp+40]
@@ -432,6 +434,14 @@ streq:
 ; (1 bucket of pkey in 16 is eval's) and isn't one of skip='s
 keep:
     sub rsp, 40
+    cmp byte [small], 0
+    je .key
+    xor eax, eax                ; train gets every one of these (even skip='s), eval none
+    cmp qword [split], 1
+    setne al
+    add rsp, 40
+    ret
+.key:
     mov rdx, rdi
     call pkey
     cmp qword [split], 2

@@ -55,6 +55,7 @@ align 8
 qd2 dq d20, 0, d21, 0, d22, 1
 sins dq 2, 3, 5, 6, 7, 10, 11, 13, 15
 NSINS equ 9
+fracc dq 2, 3, 5, 6, 7, 10      ; log_(c^i)(c^j)'s c
 
 section .bss
 alignb 8
@@ -442,6 +443,7 @@ log_one:
     mov edx, 9
     call rnd
     mov r15, rax
+    mov byte [small], 1         ; whole powers are a few hundred problems in all, train gets them all
     cmp r15, 9
     je .frac
 .pick:
@@ -678,33 +680,42 @@ log_one:
     jmp .r
 
 .frac:
-    ; log_(c^i)(c^j), j not a multiple of i
-    call coin
-    lea rbx, [rax+2]            ; c = 2 or 3
+    mov byte [small], 0
+    ; log_(c^i)(c^j), j/i already in lowest terms. lots of c, i and j, so passing n
+    ; is a rule to learn and not 16 problems to remember
+    xor ecx, ecx
+    mov edx, 5
+    call rnd
+    lea rcx, [fracc]
+    mov rbx, [rcx+rax*8]        ; c
     mov ecx, 2
-    mov edx, 3
+    mov edx, 4
     call rnd
     mov r12, rax                ; i
     mov ecx, 1
-    mov edx, 7
+    mov edx, 20
     call rnd
     mov r13, rax                ; j
     xor edx, edx
     div r12
     test rdx, rdx
     jz .frac
-    cmp rbx, 3
+    cmp r12, 4                  ; 2/4 isn't in lowest terms
     jne .fq
-    cmp r13, 6
-    ja .frac
+    test r13, 1
+    jz .frac
 .fq:
     mov rcx, rbx
     mov rdx, r12
     call ipow
+    cmp rax, 10000
+    ja .frac
     mov [rsp+40], rax           ; the base
     mov rcx, rbx
     mov rdx, r13
     call ipow
+    cmp rax, 2000000
+    ja .frac
     mov [rsp+48], rax           ; n
     mov [rsp+32], rdi
     lea rdi, [qbuf]

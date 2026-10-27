@@ -2227,16 +2227,20 @@ prob_one:
     call rnd
     cmp eax, 4
     jb .bag
+    mov byte [small], 1         ; one die, two dice, coins and cards: few enough to all go in train
     cmp eax, 9
     jb .die
     cmp eax, 11
     jb .dice
     cmp eax, 14
     jb .coins
+    mov byte [small], 0
     cmp eax, 17
     jb .two
+    mov byte [small], 1
     cmp eax, 19
     jb .cards
+    mov byte [small], 0
     jmp .expect
 
 .bag:

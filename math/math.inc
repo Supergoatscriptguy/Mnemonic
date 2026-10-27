@@ -4,7 +4,7 @@
 ; mathgen.asm
 extern rnd, ndig, digits, emz, ask, askpre, askpre3, letr, mono, pmono, sterm, poly, lin
 extern mulwork, divwork, addcols, factwork, quadwork, quadp, twobin, binom, sdiv
-extern letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty
+extern letter, cf, fp, fe, nf, primes, nprimes, pow10, letters, empty, small
 ; arith.asm
 extern mulstep, mulsmall, divstep, addstep, substep, subcols, euclid, simp, pfrac, gcd
 extern sadd, coin, upto, powchain, divline, scale, rootwork
