@@ -10,7 +10,7 @@ nvcuda.dll, which comes with the NVIDIA driver. I trained it on one RTX 5070 Ti 
 - **How it was built:** [mnemonic-site.vercel.app](https://mnemonic-site.vercel.app) has a chapter for each stage.
   Its home page runs the model in your browser, on an engine I also wrote by hand in WebAssembly.
 - **The models:** [huggingface.co/SuperGoatScriptGuy/Mnemonic](https://huggingface.co/SuperGoatScriptGuy/Mnemonic)
-- **Ollama:** `ollama run supergoatscriptguy/mnemonic`
+- **Ollama:** `ollama run supergoatscriptguy/mnemonic` (or `supergoatscriptguy/mnemonic:math` for the math model)
 
 ## The models
 
@@ -28,30 +28,35 @@ below can). Each one is noticeably better than the one before.
 
 ## Mnemonic Math
 
-A separate model that only does math: the 300M, fine-tuned on about 15 million problems that `bin\mathgen` writes and
-works out. There are 31 kinds: adding, subtracting and multiplying in columns, long division, signed numbers,
+A separate model that only does math: the 300M, fine-tuned on about 22 million problems that `bin\mathgen` writes and
+works out. There are 38 kinds: adding, subtracting and multiplying in columns, long division, signed numbers,
 fractions, decimals, percents, ratios, powers, square roots, prime factorization, gcd and lcm, order of operations,
-linear and quadratic equations, systems of two, inequalities, absolute value, like terms, expanding, factoring,
-polynomial division, evaluating, exponent equations, lines through two points, sequences, mean, median and mode,
-area, volume and angles, and word problems. Every step in a worked answer is one you'd just know, like a times table
-fact, a sum under 100 or one digit of a long division. Anything bigger is worked out on the page, so the model never
-has to guess a big result in one go.
+linear and quadratic equations, equations like x² = 49, systems of two, inequalities, absolute value, like terms,
+expanding, factoring, polynomial division, evaluating, exponent equations, lines through two points, sequences, mean,
+median and mode, area, volume and angles, unit conversions, money (discounts, tax, tips, change, interest), percent
+change, probability, logarithms, derivatives of polynomials, and word problems. Every step in a worked answer is one
+you'd just know, like a times table fact, a sum under 100 or one digit of a long division. Anything bigger is worked
+out on the page, so the model never has to guess a big result in one go.
 
-On 3,085 problems it never saw, it gets 99.7% right, and the 9 it misses are about wording, not wrong math. It also
-gets all 66 questions in `math\messy.txt`, which are typed the way people type ("whats 17 times 23", "solve 3x+5=20",
-"factor x²+5x+6"). But it only knows those 31 kinds. Ask it for a derivative or a probability and it answers anyway,
-wrongly.
+On 3,085 problems of the first 31 kinds that it never saw, it gets 99.6% right, and 697 of 700 of the newer 7. All but
+one of the misses are about wording, not wrong math (the one: it forgot that a nonagon has 9 sides). Of the 201
+questions in `math\messy*.txt`, which are typed the way people type ("whats 17 times 23", "solve 3x+5=20", "derivative
+of x^2 + 3x", "20% off a $35 shirt"), it gets 196. But it only knows those 38 kinds. Ask it for an integral or a proof
+and it answers anyway, wrongly.
 
 ```
 curl.exe -L -o models\mnemonic-math-q8.mnm https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-math-q8.mnm
 .\bin\chat model=models\mnemonic-math-q8.mnm temp=0 max=2000
+ollama run supergoatscriptguy/mnemonic:math
 ```
 
-`mnemonic-math-q4.mnm` is the int4 version, 181 MB instead of 291, and it scores the same on all of the above.
-It's in the site's demo too. It isn't on Ollama yet: llama.cpp splits numbers into tokens 3 digits at a time and my
-tokenizer does 2, so there it misreads any number with 3 or more digits.
+`mnemonic-math-q4.mnm` is the int4 version, 181 MB instead of 291, and it scores the same on the held-out problems and
+198 of the typed ones. It's in the site's demo too. On Ollama the tags are `math` (Q8_0), `math-q4_0` and `math-f16`. llama.cpp splits numbers into
+tokens 3 digits at a time where my tokenizer does 2, so half of the training questions were split the llama.cpp way
+(`tokenize dig3=2`), and the model reads both. Through Ollama it gets 195 of the 201: "450 ml" split as one group
+came out as millimeters.
 
-Training it took 3 billion tokens over about 26 hours: `bin\train math`, then the polish runs `math2` to `math5`
+Training it took 4.6 billion tokens over about 40 hours: `bin\train math`, then the polish runs `math2` to `math8`
 (`train\math*.cfg`), each one fixing what the last one's misses showed. `bin\matheval` scores a model on a file of
 held-out problems, topic by topic.
 
@@ -66,7 +71,7 @@ held-out problems, topic by topic.
 | `model` | The transformer: parameter layout, forward and backward passes as kernel launches, and the PTX for norms, attention and the rest |
 | `train` | The trainer (checkpoints, resuming, the progress bar, logs), chat data packing, a profiler |
 | `chat` | int8 and int4 quantization, the CPU inference engine (AVX2 and AVX-VNNI), the console chat, GGUF export for Ollama |
-| `math` | The math model's data: 31 kinds of worked problems, the noise that makes questions look typed, and the scorer |
+| `math` | The math model's data: 38 kinds of worked problems, the noise that makes questions look typed, and the scorer |
 | `site` | The WebAssembly engine behind the browser demo |
 | `test` | Self-checking tests for all of the above |
 | `asmdata` | Tools for a NASM fine-tuning set, on hold for now |
